@@ -18,7 +18,7 @@ Robustheit:
   - Index-Fallbacks auf ETF-Proxies (z. B. ^STOXX50E -> EXW1.DE; ^FCHI -> E40.PA; ^GDAXI -> EXS1.DE).
   - Normalisierung problematischer Ticker (z. B. '^FTSEMIB' -> 'FTSEMIB.MI').
   - Synthetische FX (GBPUSD) aus GBPEUR × EURUSD, wenn Direktticker ausfällt.
-  - „🎛️ Code‑1‑Modus“: 1‑Tages‑Horizont, Haltedauer=1, min_score=0.55, ATRN=0.3–4.0%, SHORT an, Feature‑Normierung aus.
+  - „🎛️ Code‑1‑Modus“: 1‑Tages‑Horizont, Haltedauer=1, min_score=0.55, ATRN=0.3–4.0%, SHORT an, Normierung aus.
 
 🆕 Live-Preis (Beta):
   - Optionaler Live-Schalter in der Sidebar.
@@ -33,7 +33,16 @@ NEU (Gating-Logik, Stabilitäts-Patches):
   - Backtest startet nur per Button „🚀 Backtest starten“.
   - Auto-Refresh pausiert automatisch während Screener/Backtest; Ergebnisse werden persistiert.
   - Sidebar-Button „🔄 Auto‑Refresh wieder aktivieren“ hebt die Pause wieder auf.
+
+Trader‑QoL (neu):
+  - Mindesthistorie je Ticker konfigurierbar (Default 20).
+  - MACD_hist_prev‑Fallback: first valid row nutzt prev=hist statt Komplett‑Drop.
+  - Diagnose-Deckung: „Gewählt vs Panel/Roh/Picks“.
+  - ATRN‑Band im Rule‑Check optional an/aus.
+  - Klarere Hinweise bei leeren Rohsignalen.
+  - Symbol‑Quick‑Diagnose (letzte 3 Zeilen je Titel).
 """
+
 import os
 import re
 import html
@@ -42,12 +51,10 @@ import unicodedata
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
-from datetime import timedelta
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import streamlit as st
-import matplotlib.pyplot as plt
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, roc_auc_score, brier_score_loss
@@ -129,153 +136,109 @@ def hover_info_icon(text: str) -> str:
 # =========================
 HELP = {
     # Auswahl / Katalog
-    "symbols": (
-        "Wähle Plus500‑Titel im Multi‑Select. Die App mappt den Titel automatisch auf einen "
-        "funktionierenden Yahoo‑Ticker, inkl. Fallbacks (ETF‑Proxy / Spot‑Fallback / Futures‑Fallback)."
-    ),
-    "history_years": (
-        "Lookback für den Daten‑Download. Mehr Historie = robustere Features & stabileres Modell."
-    ),
-
-    # Haltedauer / Skalierung / Forecast
-    "hold_days": (
-        "Maximale Haltedauer eines Trades. Spätester Exit H Tage nach Entry (Entry = Open t+1)."
-    ),
-    "scale_mode": (
-        "Skalierung von Stop/TP/Trailing relativ zur Haltedauer:\n"
-        "• √Zeit (empfohlen): Stop/TP ∝ √Haltedauer.\n"
-        "• linear: Stop/TP ∝ Haltedauer.\n"
-        "• keine: keine Skalierung (feste Basen: Stop 1× ATR, TP 1.8× ATR)."
-    ),
-    "forecast_horizon": (
-        "Wenn aktiv, werden KI‑Labels auf H‑Tage‑Horizont (H = Haltedauer) gebildet. "
-        "Wenn aus: KI nutzt 1‑Tages‑Labels."
-    ),
+    "history_years": "Lookback für den Daten‑Download. Mehr Historie = robustere Features & stabileres Modell.",
+    "hold_days": "Maximale Haltedauer eines Trades. Spätester Exit H Tage nach Entry (Entry = Open t+1).",
+    "scale_mode": "Skalierung Stop/TP/Trailing: √Zeit, linear oder keine.",
+    "forecast_horizon": "Wenn an: KI‑Label über Haltedauer H, sonst 1‑Tag‑Label.",
 
     # Konto / Risiko / Filter
     "equity": "Kontogröße (Equity) für Positionsgrößen & Backtest.",
-    "risk_pct": (
-        "Risikoprozent je Trade: Positionsgröße = (Equity × Risiko%) ÷ (Stopdistanz × Punktewert)."
-    ),
-    "enable_short": "Erlaubt Short‑Signale. Bei Deaktivierung nur LONG.",
-    "min_score": (
-        "Signalfilter auf FinalScore (0–1): FinalScore = 0.7×AI_Prob + 0.3×Rule_OK. "
-        "AI_Prob: LONG = P(Up), SHORT = 1 − P(Up). Rule_OK ∈ {0,1}."
-    ),
-    "time_exit": "Zeitbasierter Exit: schließt Position spätestens nach H Tagen.",
-    "trailing": (
-        "Trailing‑Stop mit ATR vom Vortag (kein Intraday‑Look‑Ahead). "
-        "LONG: max(Initial, HH − m×ATR_prev); SHORT: min(Initial, LL + m×ATR_prev)."
-    ),
-    "atrn_minmax": (
-        "Band für relative Volatilität (ATRN = ATR/Close). Filtert zu „tote“ bzw. zu „volatile“ Märkte aus. "
-        "Code‑1‑Preset: 0.3–4.0%."
-    ),
-    "cost_per_trade": "Fixe Kosten je Trade (hin & raus). Wird vom PnL abgezogen.",
-    "stop_first": "Bei gleichzeitiger Tagesberührung zählt Stop vor TP (konservativ).",
+    "risk_pct": "Positionsgröße = (Equity × Risiko%) ÷ (Stopdistanz × Punktewert).",
+    "enable_short": "SHORTs erlauben.",
+    "min_score": "FinalScore‑Schwelle: 0.7×AI_Prob + 0.3×Rule_OK.",
+    "time_exit": "Schließt Position spätestens nach H Tagen.",
+    "trailing": "Trailing mit ATR vom Vortag (kein Intraday‑Look‑Ahead).",
+    "atrn_minmax": "ATRN‑Band (ATR/Close). Code‑1: 0.3–4.0%.",
+    "cost_per_trade": "Fixe Kosten je Trade.",
+    "stop_first": "Stop vor TP bei gleichzeitiger Berührung (konservativ).",
+    "use_ai_bt": "KI (RandomForest) in Walk‑Forward nutzen.",
+    "retrain_every": "Retraining‑Frequenz (Tage).",
+    "fast_mode": "Schnellerer Backtest (kürzeres Fenster, weniger Features).",
+    "feature_norm": "z‑Score Normierung je Symbol.",
+    "max_port_risk": "Risikodeckel (× Einzetrisiko).",
 
-    # KI / Walk-Forward
-    "use_ai_bt": "RandomForest im Walk‑Forward‑Backtest verwenden.",
-    "retrain_every": "Retraining‑Frequenz in Tagen (höher = schneller).",
-    "fast_mode": "Beschleunigt Backtest: kürzeres Fenster, weniger Features, selteneres Retraining.",
-    "feature_norm": "Feature‑Normierung (z‑Score je Symbol) aktivieren.",
-    "max_port_risk": (
-        "Portfolio‑Risikodeckel: Max simultanes Gesamtrisiko in Vielfachen des Einztrisikos (Equity × Risiko%)."
-    ),
-
-    # Plus500 / Hebel / Punktewert
-    "acct_type": (
-        "Konto‑Typ gemäß ESMA/Pro.\n• Retail: strengere Hebelgrenzen\n• Professional: höhere Hebelgrenzen"
-    ),
-    "min_leverage_filter": "Filtert Katalog nach Mindesthebel (≥).",
+    # Plus500
+    "acct_type": "Konto‑Typ (Retail/Pro) steuert Hebelgrenzen.",
     "point_value": "CFD‑Punktewert: PnL = (Exit − Entry) × Units × Punktewert.",
 
-    # Code‑1‑Preset
-    "code1_mode": (
-        "Preset: Horizont=1, Haltedauer=1, min_score=0.55, ATRN 0.3–4.0%, SHORT an, Normierung aus."
-    ),
+    # Code‑1
+    "code1_mode": "Preset: H=1, Score=0.55, ATRN 0.3–4.0%, SHORT an, Normierung aus.",
 
-    # Live-Preis
-    "live_toggle": (
-        "Patcht den heutigen Close mit Live‑Minutenpreis (1m/5m/fast_info). "
-        "Features bleiben vom Vortag → kein Intraday‑Look‑Ahead."
-    ),
-    "auto_refresh": "Periodisches Nachladen von Live‑Preisen (Intervall).",
-    "live_entry": (
-        "Verwendet den Live‑Preis als Entry im Trade‑Plan (nur Anzeige; Backtest bleibt EOD)."
-    ),
+    # Live
+    "live_toggle": "Heutigen Close mit Live‑Minutenpreis patchen.",
+    "auto_refresh": "Auto‑Refresh für Live‑Patch.",
+    "live_entry": "Entry im Plan = Live‑Preis (nur Anzeige).",
+
+    # Trader‑Erweitert
+    "use_atrn_filter": "ATRN‑Band im Rule‑Check anwenden (an/aus).",
+    "min_rows_first_ok": "Minimale Historie (Zeilen) für ersten funktionierenden Ticker (Default 20).",
 }
 
 # =========================
-# (NEU) Spalten-Tooltips
+# Spalten-Tooltips
 # =========================
 COL_HELP: Dict[str, str] = {
-    "Plus500Name": "Originaler Plus500-Name des Instruments.",
-    "OrigSymbol": "Plus500-Name/Instrument, so wie du es ausgewählt hast (z. B. GERMANY 40).",
-    "Symbol": "Daten-Ticker bei Yahoo Finance, der für die Berechnung verwendet wird.",
-    "Category": "Instrumenten-Kategorie (Indizes, Forex, Rohstoffe, Aktien, …).",
-    "Date": "Handelsdatum (Schlusskurs-Tag).",
-    "Open": "Eröffnungskurs des Tages.",
-    "High": "Tageshoch (höchster Kurs des Tages).",
-    "Low": "Tagestief (niedrigster Kurs des Tages).",
-    "Close": "Schlusskurs des Tages (oder aktuellster Live-Wert, falls aktiviert).",
-    "Adj Close": "Anpassungsbereinigter Schlusskurs (Dividenden/Splits berücksichtigt).",
-    "EMA20": "Exponentieller 20‑Tage‑Durchschnitt des Schlusskurses (kurzfristiger Trend).",
-    "EMA50": "Exponentieller 50‑Tage‑Durchschnitt des Schlusskurses (mittelfristiger Trend).",
-    "RSI7": "Relative-Stärke-Index über 7 Tage (0–100). Über 70 oft überkauft, unter 30 überverkauft.",
-    "RSI14": "Relative-Stärke-Index über 14 Tage (0–100).",
-    "MACD": "MACD-Linie (Trendfolge-Indikator aus zwei EMAs).",
-    "MACD_signal": "Signallinie des MACD (glättet die MACD-Linie).",
-    "MACD_hist": "MACD-Histogramm = MACD − Signallinie. Steigend = Momentum nimmt zu.",
-    "MACD_hist_prev": "MACD‑Histogramm vom Vortag (zum Regelvergleich).",
-    "ATR14": "Average True Range über 14 Tage: mittlere tägliche Spannweite in Preis-Punkten.",
-    "ATRN": "Relative ATR: ATR/Close. Macht Volatilität zwischen Märkten vergleichbar.",
-    "ATRN_%": "Relative ATR in % (ATR/Close × 100).",
-    "VolZ20": "Volumen-Z-Score (20 Tage): Abweichung des Volumens vom Durchschnitt.",
-    "ROC3": "Rate of Change über 3 Tage (prozentuale 3‑Tages‑Veränderung).",
-    "BreakoutUp": "1, wenn der Schlusskurs das Vortageshoch überschreitet, sonst 0.",
-    "BreakoutDn": "1, wenn der Schlusskurs unter das Vortagestief fällt, sonst 0.",
-    "Ret_1D": "Tagesänderung des Schlusskurses zum Vortag (in %).",
-    "Ret_1D_fwd": "Änderung vom heutigen Schlusskurs zum nächsten Tag (für Labels).",
-    "FwdRet_H": "Vorwärtsrendite über H Tage (für KI-Labels).",
-    "Label": "Ziel für die KI: 1 = Kurs stieg, 0 = Kurs fiel (je nach Horizont H).",
-    "AI_Prob_Up": "KI‑Wahrscheinlichkeit (0–1), dass der Kurs steigt.",
-    "AI_Prob": "Für LONG = AI_Prob_Up, für SHORT = 1 − AI_Prob_Up.",
-    "Direction": "Handelsrichtung: LONG (steigende Kurse) oder SHORT (fallende Kurse).",
-    "Rule_OK": "1 = Regelbedingungen (Trend/Momentum/Volatilität) erfüllt; 0 = nicht erfüllt.",
-    "FinalScore": "Endscore 0–1: 70 % KI‑Wahrscheinlichkeit + 30 % Regel‑Check.",
-    "EntryPrice_used": "Einstiegskurs im Plan (Live‑Preis, wenn aktiviert; sonst Close).",
-    "Stop": "Stop‑Loss‑Level des Handelsplans (Risikoschutz).",
-    "TakeProfit": "Kursziel (Take‑Profit) des Handelsplans.",
-    "Units_suggested": "Vorgeschlagene Positionsgröße (Stückzahl/Kontrakte) basierend auf Risiko‑% und ATR.",
-    "Time_Exit_By": "Spätester Ausstiegszeitpunkt nach H Tagen (Time‑Exit).",
-    "Trailing": "Beschreibung der aktiven Trailing‑Stop‑Logik (ATR vom Vortag).",
-    "OK_Features": "Sind zentrale Kennzahlen (Preis, ATR, ATRN) vollständig vorhanden?",
-    "EntryDate": "Datum, an dem die Position eröffnet wurde (zum Tages-Open).",
-    "EntryPrice": "Eröffnungskurs am Entry‑Tag.",
-    "ATR14_atEntry": "ATR(14) am Vortag des Einstiegs (für Stop/TP-Berechnung).",
-    "StopInit": "Initiales Stop‑Loss‑Niveau beim Einstieg.",
-    "TPInit": "Initiales Take‑Profit‑Niveau beim Einstieg.",
-    "ExitDate": "Datum, an dem die Position geschlossen wurde.",
-    "ExitPrice": "Kurs beim Ausstieg (Stop, Ziel oder Time‑Exit).",
-    "ExitReason": "Grund des Ausstiegs (Stop, TP, gleichentags, Time‑Exit).",
-    "DaysHeld": "Anzahl Kalendertage, die die Position offen war.",
-    "PnL": "Gewinn/Verlust der Position in Kontowährung (nach fixen Kosten).",
-    "R": "Ergebnis in Risikoeinheiten: PnL geteilt durch eingesetztes Risiko je Trade.",
-    "Win": "True/False – ob der Trade Gewinn gemacht hat.",
-    "Trades": "Anzahl der Trades je Titel.",
-    "WinRate": "Trefferquote: Anteil gewinnender Trades.",
-    "AvgR": "Durchschnittliches R‑Ergebnis je Trade.",
-    "TotalPnL": "Summe aller Gewinne/Verluste je Titel.",
-    "Vol-Zone": "Einstufung der aktuellen relativen Volatilität (zu niedrig / ok / zu hoch).",
+    "Plus500Name": "Originaler Plus500-Name.",
+    "OrigSymbol": "Plus500-Name so wie gewählt.",
+    "Symbol": "Verwendeter Yahoo‑Ticker.",
+    "Category": "Kategorie (Indices/FX/…)",
+    "Date": "Schlusskurs‑Tag.",
+    "Open": "Tages‑Open.",
+    "High": "Tages‑High.",
+    "Low": "Tages‑Low.",
+    "Close": "Tages‑Close (oder Live‑Patch).",
+    "EMA20": "EMA(20).",
+    "EMA50": "EMA(50).",
+    "RSI7": "RSI(7).",
+    "RSI14": "RSI(14).",
+    "MACD": "MACD‑Linie.",
+    "MACD_signal": "MACD‑Signal.",
+    "MACD_hist": "MACD‑Histogramm.",
+    "MACD_hist_prev": "MACD‑Hist vom Vortag.",
+    "ATR14": "ATR(14).",
+    "ATRN": "ATR/Close.",
+    "ATRN_%": "ATRN in %.",
+    "VolZ20": "Volumen‑ZScore(20).",
+    "ROC3": "3‑Tages‑ROC.",
+    "BreakoutUp": "Close > Vor‑High.",
+    "BreakoutDn": "Close < Vor‑Low.",
+    "Ret_1D": "Tagesrendite.",
+    "Ret_1D_fwd": "Rendite t->t+1 (Label).",
+    "FwdRet_H": "Vorwärtsrendite über H.",
+    "Label": "1=Up, 0=Down.",
+    "AI_Prob_Up": "KI‑Wahrscheinlichkeit Up.",
+    "AI_Prob": "Für LONG=AI_Prob_Up, SHORT=1−AI_Prob_Up.",
+    "Direction": "LONG/SHORT/NO‑TRADE.",
+    "Rule_OK": "Regeln erfüllt (1/0).",
+    "FinalScore": "0–1 Score.",
+    "EntryPrice_used": "Entry‑Preis (Live wenn aktiv).",
+    "Stop": "Stop‑Level.",
+    "TakeProfit": "TP‑Level.",
+    "Units_suggested": "Vorgeschlagene Stückzahl.",
+    "Time_Exit_By": "Spätester Zeit‑Exit.",
+    "Trailing": "Trailing‑Beschreibung.",
+    "EntryDate": "Entry‑Datum.",
+    "EntryPrice": "Entry‑Preis.",
+    "ATR14_atEntry": "ATR am Vortag des Entry.",
+    "StopInit": "Initialer Stop.",
+    "TPInit": "Initialer TP.",
+    "ExitDate": "Exit‑Datum.",
+    "ExitPrice": "Exit‑Preis.",
+    "ExitReason": "Grund des Exits.",
+    "DaysHeld": "Kalendertage im Trade.",
+    "PnL": "PnL (nach Kosten).",
+    "R": "Ergebnis in R‑Einheiten.",
+    "Win": "Trade win?",
+    "Trades": "Trades je Titel.",
+    "WinRate": "Trefferquote.",
+    "AvgR": "Durchschnitts‑R.",
+    "TotalPnL": "Summe PnL.",
+    "Vol-Zone": "ATRN‑Zone.",
 }
 
 def build_col_config(df: pd.DataFrame) -> Dict[str, "st.column_config.Column"]:
     cfg: Dict[str, "st.column_config.Column"] = {}
-    if df is None or df.empty:
-        return cfg
-    has_cc = hasattr(st, "column_config")
-    if not has_cc:
+    if df is None or df.empty or not hasattr(st, "column_config"):
         return cfg
     for col in df.columns:
         help_txt = COL_HELP.get(col, "")
@@ -301,54 +264,6 @@ def build_col_config(df: pd.DataFrame) -> Dict[str, "st.column_config.Column"]:
         except Exception:
             pass
     return cfg
-
-# =========================
-# Sidebar-Glossar (optional)
-# =========================
-with st.sidebar.expander("ℹ️ Glossar (Sidebar‑Begriffe)", expanded=False):
-    st.markdown("""
-### Auswahl & Historie
-**Titel:** Plus500‑Instrumente, automatisch gemappt auf Yahoo‑Ticker (inkl. Proxies/Fallbacks).  
-**Historie:** Jahre an Daten für Features & Modell.
-
-### Haltedauer & Steuerung
-**Haltedauer:** Spätester Exit je Trade (Entry = Open t+1).  
-**Skalierung:** Passt Stop/TP zur Haltedauer an.  
-**KI‑Prognose:** Labels auf Haltedauer H (sonst 1‑Tag).
-
-### Risiko & Portfolio
-**Risiko %:** Positionsgröße via Equity × Risiko%.  
-**Max Gesamt‑Risiko:** Begrenzung aller offenen Positionen.
-
-### Filter
-**Score‑Filter:** FinalScore ≥ Schwelle.  
-**ATRN‑Band:** Relative Volatilität (ATR/Close).
-
-### Handelslogik
-**Short:** SHORT‑Signale erlaubt.  
-**Time‑Exit:** Zeitbasierter Exit.  
-**Trailing:** ATR_prev‑basierte Nachziehen.  
-**Stop vor TP:** Konservatives Verhalten.
-
-### KI / Backtest
-**KI im Backtest:** RandomForest im Walk‑Forward.  
-**Retrain‑Frequenz:** Wie oft neu trainiert wird.  
-**Fast Mode:** Schnellere Backtests.  
-**Feature‑Normierung:** z‑Score je Symbol.
-
-### CFD‑Spezifisch
-**Konto‑Typ:** Retail/Pro-Hebel.  
-**Mindesthebel:** Filter im Katalog.  
-**Punktewert:** CFD‑Multiplikator.
-
-### Live
-**Live‑Preis:** Patcht heutigen Close.  
-**Auto‑Refresh:** Läuft periodisch.  
-**Live‑Entry:** Entry‑Preis = Live (nur Anzeige).
-
-### Code‑1‑Modus
-Preset für H=1, Score=0.55, SHORT an, Normierung aus.
-""")
 
 # =========================
 # Utils
@@ -383,7 +298,7 @@ def status_chip(color: str, text_md: str) -> str:
         f"background:{bg};color:{fg};border-radius:10px;padding:10px 12px;"
         f"border:1px solid rgba(0,0,0,0.06);font-size:0.95rem;'>"
         f"<div style='font-size:1.1rem;'>{dot}</div>"
-        f"<div style='line-height:1.35'>{text_md}</div>"
+        f"<div style='line-height:1.35'><div><strong>Daten‑Qualität:</strong> {color.upper()}</div><div>{text_md}</div></div>"
         f"</div>"
     )
 
@@ -418,14 +333,10 @@ def assess_data_quality(panel: pd.DataFrame, use_live_now: bool) -> dict:
         elif latest_date == today:
             if now.hour > 22 or (now.hour == 22 and now.minute >= 15):
                 out["status"] = "green"
-                out["reasons"].append(
-                    f"Heutiges Datum vorhanden (nach 22:15) → Daten sehr wahrscheinlich final."
-                )
+                out["reasons"].append("Heute nach 22:15 → Daten sehr wahrscheinlich final.")
             else:
                 out["status"] = "orange"
-                out["reasons"].append(
-                    "Heutiges Datum bereits gesetzt, aber Uhrzeit < 22:15 → Daten können unvollständig sein."
-                )
+                out["reasons"].append("Heutiges Datum vor 22:15 → Daten können unvollständig sein.")
         else:
             out["status"] = "red"
             out["reasons"].append("Zukünftiges Datum erkannt (Zeit-/Datenfehler).")
@@ -455,8 +366,7 @@ def render_quality_box(q: dict):
     color = q.get("status", "gray")
     lines = q.get("reasons", [])
     text = "  \n".join(f"• {l}" for l in lines) if lines else "Keine Gründe angegeben."
-    st.markdown(status_chip(color, f"**Daten‑Qualität:** {color.upper()}  \n{text}"),
-                unsafe_allow_html=True)
+    st.markdown(status_chip(color, text), unsafe_allow_html=True)
     with st.expander("🔎 Qualitäts‑Details je Symbol", expanded=False):
         detail_df = q.get("detail", pd.DataFrame())
         st.dataframe(detail_df, use_container_width=True, column_config=build_col_config(detail_df))
@@ -642,26 +552,19 @@ with st.sidebar.form("params_form", clear_on_submit=False):
     # Konto‑Typ & Hebel‑Band
     st.markdown("### Konto‑Typ & Hebel‑Filter")
     acct_type = st.radio("Konto‑Typ", ["Retail (ESMA)", "Professional"], index=0, help=HELP["acct_type"])
-    min_leverage, max_leverage = st.slider(
-        "Hebel-Band (Min–Max)",
-        min_value=2, max_value=300, value=(2, 300), step=1,
-        help="Filtert Titel, deren zulässiger Hebel innerhalb dieses Bereichs liegt."
-    )
+    min_leverage, max_leverage = st.slider("Hebel-Band (Min–Max)", min_value=2, max_value=300, value=(2, 300), step=1)
     lev_col = "MaxLeverage_Pro" if acct_type == "Professional" else "MaxLeverage_Retail"
 
     # Kandidaten
     candidates = catalog_df.copy() if sel_cat == "Alle" else catalog_df[catalog_df["Category"] == sel_cat].copy()
     lev = pd.to_numeric(candidates[lev_col], errors="coerce")
-    candidates = candidates[(lev >= float(min_leverage)) & (lev <= float(max_leverage))]
-    candidates = candidates.sort_values(["Category","Plus500Name"]).reset_index(drop=True)
+    candidates = candidates[(lev >= float(min_leverage)) & (lev <= float(max_leverage))].sort_values(["Category","Plus500Name"]).reset_index(drop=True)
 
     # Multi-Select
     def make_search_options(df: pd.DataFrame) -> Dict[str, str]:
         lab2name = {}
         for _, r in df.iterrows():
-            name = str(r["Plus500Name"])
-            cat  = str(r.get("Category","") or "")
-            sym  = str(r.get("DataSymbol","") or "")
+            name = str(r["Plus500Name"]); cat = str(r.get("Category","") or ""); sym = str(r.get("DataSymbol","") or "")
             label = f"[{cat}] {name}" + (f" — ({sym})" if sym else "")
             lab2name[label] = name
         return lab2name
@@ -669,12 +572,7 @@ with st.sidebar.form("params_form", clear_on_submit=False):
     lab2name = make_search_options(candidates)
     search_labels = sorted(lab2name.keys())
     sel_all = st.checkbox("Alle Titel auswählen", value=False)
-    selected_labels = st.multiselect(
-        "Titel suchen & auswählen (tippbar)",
-        options=search_labels,
-        default=(search_labels if sel_all else []),
-        help="Tippe zum Filtern; mehrere Titel wählen."
-    )
+    selected_labels = st.multiselect("Titel suchen & auswählen (tippbar)", options=search_labels, default=(search_labels if sel_all else []))
     selected_plus500 = [lab2name[l] for l in selected_labels]
 
     # Manuelle Ticker
@@ -712,19 +610,19 @@ with st.sidebar.form("params_form", clear_on_submit=False):
     st.markdown("### Live‑Preis (Beta)")
     use_live_now = st.checkbox("📡 Live‑Preis verwenden", value=False, help=HELP["live_toggle"])
     use_live_entry_in_plan = st.checkbox("Entry im Trade‑Plan = Live‑Preis (nur Anzeige)", value=True, help=HELP["live_entry"])
-    # Wichtig: Standard AUS lassen, kein implizites Einschalten durch use_live_now
     auto_refresh_on = st.checkbox("Auto‑Refresh aktivieren", value=False, help=HELP["auto_refresh"])
     live_interval_sec = st.slider("Auto‑Refresh Intervall (Sek.)", 10, 300, 60, 10)
 
     # Backtest-Zeitraum
     bt_default_start = (pd.Timestamp.today() - pd.DateOffset(years=min(5, history_years))).date()
-    bt_start, bt_end = st.date_input(
-        "Backtest-Zeitraum",
-        value=(bt_default_start, pd.Timestamp.today().date()),
-        help="Zeitraum für die Backtest-Auswertung (Signale werden davor trotzdem aus dem Lookback trainiert)."
-    )
+    bt_start, bt_end = st.date_input("Backtest-Zeitraum", value=(bt_default_start, pd.Timestamp.today().date()))
 
-    debug_mode = st.checkbox("🔧 Debug-Ausgaben", value=False)
+    # (NEU) Diagnose / Erweitert
+    with st.expander("🔧 Diagnose / Erweitert", expanded=False):
+        use_atrn_filter = st.checkbox("ATRN‑Band im Rule‑Check anwenden", value=True, help=HELP["use_atrn_filter"])
+        min_rows_first_ok = st.number_input("Minimale Historie (Zeilen) je Kandidat", min_value=10, max_value=60, value=20, step=1, help=HELP["min_rows_first_ok"])
+
+    debug_mode = st.checkbox("🪛 Debug-Ausgaben", value=False)
 
     # Form-Submit
     submitted = st.form_submit_button("✅ Einstellungen übernehmen")
@@ -743,7 +641,8 @@ if submitted:
         use_live_now=use_live_now, use_live_entry_in_plan=use_live_entry_in_plan,
         auto_refresh_on=auto_refresh_on, live_interval_sec=live_interval_sec,
         bt_start=pd.to_datetime(bt_start), bt_end=pd.to_datetime(bt_end),
-        debug_mode=debug_mode
+        debug_mode=debug_mode,
+        use_atrn_filter=use_atrn_filter, min_rows_first_ok=int(min_rows_first_ok)
     )
     st.session_state["params_ready"] = True
 
@@ -754,7 +653,7 @@ if not st.session_state.get("params_ready"):
     st.stop()
 
 # =========================
-# (NEU) Sitzungs-Flags & Persistenz
+# Sitzungs-Flags & Persistenz
 # =========================
 st.session_state.setdefault("refresh_paused", False)
 st.session_state.setdefault("latest_signals", pd.DataFrame())
@@ -765,7 +664,6 @@ st.session_state.setdefault("last_signals_all", pd.DataFrame())
 st.session_state.setdefault("last_backtest_trades", pd.DataFrame())
 st.session_state.setdefault("last_backtest_summary", pd.DataFrame())
 st.session_state.setdefault("last_backtest_eq", pd.Series(dtype="float64"))
-# Debounce für Live-Patching
 st.session_state.setdefault("last_live_patch_ts", pd.Timestamp(0, tz="Europe/Berlin"))
 
 # =========================
@@ -793,23 +691,23 @@ for _, r in symbol_rows.iterrows():
         default_pv = float(default_pv) if np.isfinite(default_pv) else 1.0
     except Exception:
         default_pv = 1.0
-    val = st.sidebar.number_input(
-        f"{orig} Punktewert", min_value=0.01, value=point_values.get(orig, default_pv), step=0.1, help=HELP["point_value"]
-    )
+    val = st.sidebar.number_input(f"{orig} Punktewert", min_value=0.01, value=point_values.get(orig, default_pv), step=0.1, help=HELP["point_value"])
     point_values[orig] = float(val)
 st.session_state["point_values"] = point_values
 
-# (NEU) Sidebar-Button: Auto-Refresh wieder aktivieren
+# =========================
+# Auto-Refresh Steuerung
+# =========================
 st.sidebar.markdown("### 🔄 Auto‑Refresh Steuerung")
 if st.session_state.get("refresh_paused"):
-    st.sidebar.caption("Auto‑Refresh ist aktuell **pausiert** (wird beim Screener/Backtest automatisch pausiert).")
-resume_refresh = st.sidebar.button("🔄 Auto‑Refresh wieder aktivieren", help="Hebt die Pause auf und startet den Auto‑Refresh wieder.")
+    st.sidebar.caption("Auto‑Refresh ist aktuell **pausiert**.")
+resume_refresh = st.sidebar.button("🔄 Auto‑Refresh wieder aktivieren")
 if resume_refresh:
     st.session_state["refresh_paused"] = False
     st.experimental_rerun()
 
 # =========================
-# GATING-Schaltflächen: Daten laden / Reset
+# Daten laden / Reset
 # =========================
 START_DATE = (pd.Timestamp.today() - pd.DateOffset(years=params["history_years"])).strftime("%Y-%m-%d")
 
@@ -831,7 +729,7 @@ if do_reset:
               "latest_picks_plan", "latest_rec_df", "last_signals_all",
               "last_backtest_trades", "last_backtest_summary", "last_backtest_eq"]:
         st.session_state.pop(k, None)
-    st.success("Zurückgesetzt. Du kannst jetzt erneut Daten laden.")
+    st.success("Zurückgesetzt. Bitte erneut Daten laden.")
     st.stop()
 
 # --- Diagnose-Expander: yfinance-Test & Cache-Clear ---
@@ -846,7 +744,7 @@ with st.expander("🩺 Diagnose: yfinance-Test & Cache", expanded=False):
                 if len(test) < 50:
                     st.warning("Wenig Zeilen → möglicherweise Netzwerk/Firewall/Rate-Limit.")
                 else:
-                    st.success("yfinance funktioniert. Problem liegt eher bei Auswahl/Mapping/Lookback.")
+                    st.success("yfinance ok. Problem wahrsch. bei Mapping/Lookback/Filter.")
             except Exception as e:
                 st.error(f"yfinance Fehler: {e}")
     with c2:
@@ -855,7 +753,7 @@ with st.expander("🩺 Diagnose: yfinance-Test & Cache", expanded=False):
             st.success("Cache geleert. Bitte erneut laden.")
 
 # =========================
-# Funktionen: Features & Daten
+# Technische Indikatoren & Daten
 # =========================
 def ema(s: pd.Series, span: int) -> pd.Series:
     s = pd.to_numeric(s, errors="coerce")
@@ -895,57 +793,41 @@ def roc(s: pd.Series, n: int=3) -> pd.Series:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_history_single(symbol: str, start: str) -> pd.DataFrame:
-    """Robuster History-Download mit Fallbacks und optionaler FX-Synthese (tolerant)."""
+    """Robuster History-Download mit Fallbacks; toleranter Clean."""
     sym = normalize_yahoo_symbol(symbol)
 
     def _clean(df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
             return pd.DataFrame()
-        # MultiIndex glätten
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        # Duplikate entfernen
         df = df.loc[:, ~df.columns.duplicated()]
 
-        # Close als Kern – falls OHLC fehlen, synthetisch aus Close befüllen
         close = df.get("Close")
-        if close is None:
-            close = df.get("Adj Close")
-            if close is not None:
-                df["Close"] = close
+        if close is None and df.get("Adj Close") is not None:
+            df["Close"] = df["Adj Close"]
 
-        # Synthetische OHLC, falls nötig
         if "Close" in df.columns:
-            if "Open" not in df.columns:
-                df["Open"] = df["Close"]
-            if "High" not in df.columns:
-                df["High"] = df["Close"]
-            if "Low" not in df.columns:
-                df["Low"] = df["Close"]
+            for c in ["Open","High","Low"]:
+                if c not in df.columns:
+                    df[c] = df["Close"]
 
-        # Zahlencasting
         for c in ["Open","High","Low","Close","Adj Close","Volume"]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
 
-        # Kernspalten
         core = [c for c in ["Open","High","Low","Close"] if c in df.columns]
         if not core:
             return pd.DataFrame()
 
-        # Nur Zeilen entfernen, wenn Kernpreise fehlen
         df = df.dropna(subset=core, how="any")
         if df.empty:
             return pd.DataFrame()
 
-        # Datumsindex robust & tz-naiv
         df.index = pd.to_datetime(df.index, errors="coerce")
         df = df[~df.index.isna()]
-        try:
-            df.index = df.index.tz_localize(None)
-        except Exception:
-            pass
-
+        try: df.index = df.index.tz_localize(None)
+        except Exception: pass
         return df
 
     def _try_download(**kwargs) -> Optional[pd.DataFrame]:
@@ -958,22 +840,21 @@ def fetch_history_single(symbol: str, start: str) -> pd.DataFrame:
 
     errors = []
 
-    # Try 1: start-basiert
+    # start-basiert
     df = _try_download(start=start)
     if df is not None and len(df) >= 30:
         return df
     if df is None: errors.append("start")
 
-    # Try 2: period='max'
+    # period=max
     df = _try_download(period="max", interval="1d")
     if df is not None and len(df) >= 30:
         try: df = df[df.index >= pd.to_datetime(start)]
         except Exception: pass
-        if not df.empty:
-            return df
+        if not df.empty: return df
     if df is None: errors.append("period=max")
 
-    # Try 3: Ticker().history
+    # Ticker().history
     try:
         t = yf.Ticker(sym)
         hist = t.history(period="max", interval="1d", auto_adjust=True)
@@ -987,7 +868,7 @@ def fetch_history_single(symbol: str, start: str) -> pd.DataFrame:
     except Exception:
         errors.append("Ticker.history")
 
-    # Try 4: Synthetisches GBPUSD = GBPEUR × EURUSD
+    # synthetisches GBPUSD
     if sym.upper() == "GBPUSD=X":
         try:
             g_eur = fetch_history_single("GBPEUR=X", start)
@@ -997,9 +878,7 @@ def fetch_history_single(symbol: str, start: str) -> pd.DataFrame:
                 if len(idx) > 0:
                     px = (g_eur.loc[idx, "Close"] * e_usd.loc[idx, "Close"]).dropna()
                     if not px.empty:
-                        out = pd.DataFrame({
-                            "Open": px, "High": px, "Low": px, "Close": px, "Volume": 0.0
-                        }, index=idx)
+                        out = pd.DataFrame({"Open": px, "High": px, "Low": px, "Close": px, "Volume": 0.0}, index=idx)
                         return _clean(out)
         except Exception:
             pass
@@ -1056,44 +935,32 @@ def explode_candidates(data_sym: str, orig_name: str) -> List[str]:
 
     norm_orig = _norm(orig_name)
 
-    # EURO STOXX 50 – ETF Proxy
+    # ETF/Spot-Fallbacks
     if any(cs.upper()=="^STOXX50E" for cs in cands) or norm_orig in {"EURO STOXX 50","EUROSTOXX 50","STOXX50E"}:
         if "EXW1.DE" not in cands: cands.append("EXW1.DE")
-
-    # CAC 40 – ETF Proxy
     if any(cs.upper()=="^FCHI" for cs in cands) or norm_orig in {"FRANCE 40","CAC 40","CAC40"}:
         if "E40.PA" not in cands: cands.append("E40.PA")
-
-    # DAX – ETF Proxy
     if any(cs.upper()=="^GDAXI" for cs in cands) or norm_orig in {"GERMANY 40","GER40","DAX"}:
         if "EXS1.DE" not in cands: cands.append("EXS1.DE")
-
-    # SILBER – Spot Fallback
     if any(cs.upper()=="SI=F" for cs in cands) or norm_orig in {"SILVER","XAG","XAGUSD"}:
         if "XAGUSD=X" not in cands: cands.append("XAGUSD=X")
-
-    # PALLADIUM – Spot Fallback
     if any(cs.upper()=="PL=F" for cs in cands) or norm_orig in {"PALLADIUM","XPD","XPDUSD"}:
         if "XPDUSD=X" not in cands: cands.append("XPDUSD=X")
-
-    # RBOB Benzin – ETF Fallback
     if any(cs.upper()=="RB=F" for cs in cands) or norm_orig in {"RBOB","GASOLINE"}:
         if "UGA" not in cands: cands.append("UGA")
-
-    # GOLD – Spot ergänzen
     if (norm_orig in {"GOLD","XAU","XAUUSD","GOLD/USD"} or any(cs.upper()=="GC=F" for cs in cands)):
         if "XAUUSD=X" not in cands: cands.append("XAUUSD=X")
-
     return list(dict.fromkeys(cands))
 
-def fetch_first_ok(candidates: List[str], start: str) -> Tuple[pd.DataFrame, Optional[str]]:
+def fetch_first_ok(candidates: List[str], start: str, min_rows:int=20) -> Tuple[pd.DataFrame, Optional[str]]:
+    """Nimmt den ersten Kandidaten mit >= min_rows Zeilen Historie (Default 20)."""
     for s in candidates:
         df = fetch_history_single(s, start)
-        if df is not None and not df.empty and len(df) >= 30:
+        if df is not None and not df.empty and len(df) >= int(min_rows):
             return df, s
     return pd.DataFrame(), None
 
-def build_panel_dynamic_mapped(symbol_map: Dict[str,str], start: str, debug: bool=False) -> pd.DataFrame:
+def build_panel_dynamic_mapped(symbol_map: Dict[str,str], start: str, debug: bool=False, min_rows:int=20) -> pd.DataFrame:
     frames = []
     failures = []
     for orig, data_sym in symbol_map.items():
@@ -1101,12 +968,12 @@ def build_panel_dynamic_mapped(symbol_map: Dict[str,str], start: str, debug: boo
             candidates = explode_candidates(data_sym, orig)
             if debug:
                 st.write(f"{orig} Kandidaten: {candidates}")
-            df, used_symbol = fetch_first_ok(candidates, start)
+            df, used_symbol = fetch_first_ok(candidates, start, min_rows=min_rows)
             if df is None or df.empty:
-                failures.append(f"{orig}: Download leer (Kandidaten: {candidates})")
+                failures.append(f"{orig}: Download leer/zu kurz (Kandidaten: {candidates}, min_rows={min_rows})")
                 continue
-            if len(df) < 30:
-                failures.append(f"{orig}: Zu wenig Historie ({len(df)} Zeilen) für {used_symbol}")
+            if len(df) < min_rows:
+                failures.append(f"{orig}: Zu wenig Historie ({len(df)}) für {used_symbol} (min_rows={min_rows})")
                 continue
             feat = make_features(df)
             if feat.empty:
@@ -1120,21 +987,24 @@ def build_panel_dynamic_mapped(symbol_map: Dict[str,str], start: str, debug: boo
             failures.append(f"{orig}->{data_sym}: Fehler: {e}")
 
     if failures:
-        with st.expander("⚠️ Daten-Fehler / Skipped Symbole", expanded=True):
+        with st.expander("⚠️ Daten-Fehler / Skipped Symbole (öffnet automatisch)", expanded=True):
             for m in failures:
-                st.caption(m)
+                st.error(m)
 
     if not frames:
         return pd.DataFrame()
     panel = pd.concat(frames, ignore_index=True)
     panel["Date"] = _to_naive_dt(panel["Date"])
     panel = panel.sort_values(["OrigSymbol","Date"]).reset_index(drop=True)
+    # (NEU) MACD_prev‑Fallback: erste Zeile je Symbol bekommt prev=hist
     panel["MACD_hist_prev"] = panel.groupby("OrigSymbol")["MACD_hist"].shift(1)
+    first_idx = panel.groupby("OrigSymbol")["Date"].transform("idxmin") == panel.index
+    panel.loc[first_idx, "MACD_hist_prev"] = panel.loc[first_idx, "MACD_hist"]
     panel = panel.dropna(subset=["MACD_hist_prev"]).reset_index(drop=True)
     return panel
 
 def fetch_live_last(symbol: str) -> Optional[float]:
-    """Holt den aktuellsten Intraday-Minutenpreis (1m/5m/fast_info Fallback), robust."""
+    """Holt den aktuellsten Intraday-Minutenpreis (1m/5m/fast_info Fallback)."""
     sym = normalize_yahoo_symbol(symbol)
 
     def _last_close(df: pd.DataFrame) -> Optional[float]:
@@ -1167,7 +1037,7 @@ def fetch_live_last(symbol: str) -> Optional[float]:
         return None
 
 def inject_live_close(panel: pd.DataFrame, use_live: bool) -> pd.DataFrame:
-    """Patcht für HEUTE (letztes Datum im Panel) den Close durch einen Live-Minutenpreis. Keine Intraday-Feature-Änderung."""
+    """Patcht HEUTE den Close durch Live-Minutenpreis. Features bleiben Vortag."""
     if not use_live or panel is None or panel.empty:
         return panel
     df = panel.copy()
@@ -1188,13 +1058,13 @@ def inject_live_close(panel: pd.DataFrame, use_live: bool) -> pd.DataFrame:
             df.loc[sel, "Close"] = float(live)
             patched += 1
     if patched > 0:
-        st.caption(f"Live‑Patch: {patched} Titel mit momentanen Preisen aktualisiert (Close@heute).")
+        st.caption(f"Live‑Patch: {patched} Titel aktualisiert (Close@heute).")
     else:
-        st.caption("Live‑Patch: Keine aktuellen Preise verfügbar (verwende Close vom Vortag).")
+        st.caption("Live‑Patch: Kein aktueller Preis verfügbar (verwende Close vom Vortag).")
     return df
 
 def maybe_inject_live(panel: pd.DataFrame, use_live: bool, interval_sec: int) -> pd.DataFrame:
-    """Debounced Live-Patching: Nur patchen, wenn Intervall verstrichen ist."""
+    """Debounced Live-Patching."""
     if panel is None or panel.empty or not use_live:
         return panel
     now = _now_berlin()
@@ -1208,19 +1078,24 @@ def maybe_inject_live(panel: pd.DataFrame, use_live: bool, interval_sec: int) ->
         st.session_state["last_live_patch_ts"] = now
         return out
     else:
-        # Kein Patch nötig – Daten flackern weniger
         return panel
 
 # =========================
-# Regeln
+# Regeln (mit optionalem ATRN‑Band)
 # =========================
 def rule_long(r) -> bool:
     prev = r["MACD_hist_prev"] if pd.notna(r["MACD_hist_prev"]) else r["MACD_hist"]
-    return (r["RSI7"]>55) and (r["RSI14"]>50) and (r["Close"]>r["EMA20"]) and (r["EMA20"]>r["EMA50"]) and (r["MACD_hist"]>prev) and (r["ATRN"]>=atrn_min) and (r["ATRN"]<=atrn_max)
+    core = (r["RSI7"]>55) and (r["RSI14"]>50) and (r["Close"]>r["EMA20"]) and (r["EMA20"]>r["EMA50"]) and (r["MACD_hist"]>prev)
+    if st.session_state.get("params", {}).get("use_atrn_filter", True):
+        return core and (r["ATRN"]>=atrn_min) and (r["ATRN"]<=atrn_max)
+    return core
 
 def rule_short(r) -> bool:
     prev = r["MACD_hist_prev"] if pd.notna(r["MACD_hist_prev"]) else r["MACD_hist"]
-    return (r["RSI7"]<45) and (r["RSI14"]<50) and (r["Close"]<r["EMA20"]) and (r["EMA20"]<r["EMA50"]) and (r["MACD_hist"]<prev) and (r["ATRN"]>=atrn_min) and (r["ATRN"]<=atrn_max)
+    core = (r["RSI7"]<45) and (r["RSI14"]<50) and (r["Close"]<r["EMA20"]) and (r["EMA20"]<r["EMA50"]) and (r["MACD_hist"]<prev)
+    if st.session_state.get("params", {}).get("use_atrn_filter", True):
+        return core and (r["ATRN"]>=atrn_min) and (r["ATRN"]<=atrn_max)
+    return core
 
 # =========================
 # Feature-Normierung (optional)
@@ -1265,7 +1140,6 @@ def train_and_score(panel: pd.DataFrame, allow_short: bool=True, debug: bool=Fal
     if n_splits < 2:
         return pd.DataFrame(), "Zu wenig Daten für CV."
     fold_sizes = len(unique_dates) // (n_splits + 1)
-    purge_days = 0
 
     reports, models = [], []
     for k in range(1, n_splits + 1):
@@ -1276,16 +1150,10 @@ def train_and_score(panel: pd.DataFrame, allow_short: bool=True, debug: bool=Fal
         train_dates = unique_dates[:train_end_idx]
         test_dates  = unique_dates[train_end_idx:test_end_idx]
 
-        tr_mask = df["Date"].isin(train_dates)
-        te_mask = df["Date"].isin(test_dates)
-
-        if purge_days > 0:
-            tr_max = pd.to_datetime(train_dates.max())
-            tr_mask = tr_mask & (df["Date"] <= (tr_max - pd.Timedelta(days=purge_days)))
-            te_mask = te_mask & (df["Date"] > tr_max)
-
-        Xtr, ytr = df.loc[tr_mask, features], df.loc[tr_mask, "Label"]
-        Xte, yte = df.loc[te_mask, features], df.loc[te_mask, "Label"]
+        Xtr = df[df["Date"].isin(train_dates)][features]
+        ytr = df[df["Date"].isin(train_dates)]["Label"]
+        Xte = df[df["Date"].isin(test_dates)][features]
+        yte = df[df["Date"].isin(test_dates)]["Label"]
         if len(Xtr) < 200 or len(Xte) < 50:
             continue
 
@@ -1298,10 +1166,7 @@ def train_and_score(panel: pd.DataFrame, allow_short: bool=True, debug: bool=Fal
 
     latest_date = df["Date"].max()
     latest = df[df["Date"] == latest_date].copy()
-    if not models:
-        latest["AI_Prob_Up"] = 0.5
-    else:
-        latest["AI_Prob_Up"] = models[-1].predict_proba(latest[features])[:, 1]
+    latest["AI_Prob_Up"] = 0.5 if not models else models[-1].predict_proba(latest[features])[:, 1]
 
     dirs, rules = [], []
     for _, r in latest.iterrows():
@@ -1314,7 +1179,7 @@ def train_and_score(panel: pd.DataFrame, allow_short: bool=True, debug: bool=Fal
     latest["AI_Prob"]   = np.where(latest["Direction"]=="LONG", latest["AI_Prob_Up"],
                              np.where(latest["Direction"]=="SHORT", 1.0-latest["AI_Prob_Up"], 0.0))
     latest["FinalScore"]= 0.7*latest["AI_Prob"] + 0.3*latest["Rule_OK"]
-    return latest.sort_values(["FinalScore","OrigSymbol"], ascending=[False, True]), "\n\n".join(reports) if reports else "Keine aussagekräftigen CV-Folds (zu wenig Daten)."
+    return latest.sort_values(["FinalScore","OrigSymbol"], ascending=[False, True]), "\n\n".join(reports) if reports else "Keine aussagekräftigen CV-Folds."
 
 def get_model_config(fast: bool, retrain_user: int) -> Dict:
     if fast:
@@ -1364,10 +1229,7 @@ def walkforward_signals(panel: pd.DataFrame, allow_short: bool, use_ai: bool, cf
                 clf.fit(Xtr, ytr); last_trained = d
 
         day = df.loc[test_mask].copy()
-        if use_ai and clf is not None:
-            day["AI_Prob_Up"] = clf.predict_proba(day[feats])[:, 1]
-        else:
-            day["AI_Prob_Up"] = 0.5
+        day["AI_Prob_Up"] = 0.5 if (not use_ai or clf is None) else clf.predict_proba(day[feats])[:, 1]
 
         dirs, rules = [], []
         for _, r in day.iterrows():
@@ -1393,8 +1255,7 @@ def walkforward_signals(panel: pd.DataFrame, allow_short: bool, use_ai: bool, cf
 # =========================
 # Tradeplan & Backtest
 # =========================
-def compute_multipliers(hold_days: int, mode: str,
-                        base_stop: float = 1.0, base_tp: float = 1.8) -> Tuple[float, float, float]:
+def compute_multipliers(hold_days: int, mode: str, base_stop: float = 1.0, base_tp: float = 1.8) -> Tuple[float, float, float]:
     H = max(int(hold_days), 1)
     if mode.startswith("√"):
         f = float(np.sqrt(H))
@@ -1510,7 +1371,7 @@ def backtest(panel: pd.DataFrame, signals: pd.DataFrame, equity_start: float, ri
     all_dates = sorted(df["Date"].unique())
 
     for d in all_dates:
-        # 1) EXITS & Trailing (mit ATR_prev)
+        # 1) EXITS & Trailing
         for sym in symbols_list:
             pos = open_positions.get(sym)
             if pos is None: continue
@@ -1630,14 +1491,13 @@ if do_load:
 
     with st.spinner("Lade Daten & berechne Features …"):
         @st.cache_data(show_spinner=False, ttl=3600)
-        def _build_panel_cached(symbols_map, start, debug):
-            return build_panel_dynamic_mapped(symbols_map, start, debug)
+        def _build_panel_cached(symbols_map, start, debug, min_rows):
+            return build_panel_dynamic_mapped(symbols_map, start, debug, min_rows=min_rows)
 
-        panel = _build_panel_cached(symbols_map, START_DATE, params["debug_mode"])
-        # Debounced Live-Patch statt hartem Refresh
+        panel = _build_panel_cached(symbols_map, START_DATE, params["debug_mode"], params.get("min_rows_first_ok", 20))
         panel = maybe_inject_live(panel, params["use_live_now"], int(params["live_interval_sec"]))
         if panel is None or panel.empty:
-            st.error("Keine Daten/Features. Prüfe Auswahl/Lookback oder Verbindung.")
+            st.error("Keine Daten/Features. Prüfe Auswahl/Lookback/Verbindung.")
             st.stop()
         st.session_state["panel"] = panel
         st.success("Panel geladen. Du kannst jetzt im Screener/Backtest fortfahren.")
@@ -1649,51 +1509,38 @@ if panel is None or panel.empty:
     st.stop()
 
 # =========================
-# Optional Auto‑Refresh (nur Info/Timer; Panel bleibt stabil)
+# Optional Auto‑Refresh (nur Info/Timer)
 # =========================
 if params["use_live_now"] and params["auto_refresh_on"]:
     if not st.session_state.get("refresh_paused", False):
         try:
             from streamlit_autorefresh import st_autorefresh  # type: ignore
             st_autorefresh(interval=int(params["live_interval_sec"]) * 1000, key="auto_refresh_live")
-            st.caption(f"Auto‑Refresh aktiv (alle {params['live_interval_sec']}s, via st_autorefresh).")
+            st.caption(f"Auto‑Refresh aktiv (alle {params['live_interval_sec']}s).")
         except Exception:
-            # HTML-Fallback deaktiviert, um harte Reloads zu vermeiden
-            st.warning("Auto‑Refresh-Fallback (HTML) ist deaktiviert. Installiere `streamlit_autorefresh` für sanfte Re‑Runs.")
+            st.warning("Installiere `streamlit_autorefresh` für sanfte Re‑Runs.")
     else:
-        st.caption("⏸️ Auto‑Refresh ist pausiert (während Screener/Backtest).")
+        st.caption("⏸️ Auto‑Refresh pausiert (während Screener/Backtest).")
 
 # =========================
-# Visuelle Top-Leiste (sticky)
+# Topbar: Qualität & Session‑Hint
 # =========================
 quality = assess_data_quality(panel, params["use_live_now"])
 
 def _next_actions(q: dict) -> str:
     sess = detect_session(_now_berlin())
     if q["status"] == "green":
-        if sess == "evening":
-            return "Daten gelten als final. Jetzt handeln/planen (22:15–23:30) **empfohlen**."
-        elif sess == "morning":
-            return "Daten vom Vortag sind final. **Morgens (07:00–08:00)** Check & Planung."
-        else:
-            return "Daten ok. Für finale Signale **ab 22:15** erneut prüfen."
-    if q["status"] == "orange":
-        return "Daten **teilweise** final (Intraday oder vor 22:15). Für stabile Signale später erneut ausführen."
-    return "Daten unzureichend. Prüfe Auswahl, Historie, Netzwerk oder warte auf Abschluss (nach 22:15)."
+        if sess == "evening": return "Daten final. Jetzt handeln/planen (22:15–23:30) empfohlen."
+        if sess == "morning": return "Vortagsdaten final – morgens checken & planen."
+        return "Daten ok. Für finale Signale ab 22:15 erneut prüfen."
+    if q["status"] == "orange": return "Teilweise final (Intraday/vor 22:15). Später erneut ausführen."
+    return "Unzureichend. Prüfe Auswahl/Historie/Netzwerk oder warte auf Abschluss."
 
-_status_dot = {"green":"🟢","orange":"🟠","red":"🔴"}
-dot = _status_dot.get(quality["status"], "⚪")
-
-reasons_list = "".join(f"<li>{html.escape(str(r))}</li>" for r in quality.get("reasons, []".split(",")[0], quality.get("reasons", [])))
-# Fallback falls oben verwirrt – sichere Variante:
-if not reasons_list:
-    reasons_list = "".join(f"<li>{html.escape(str(r))}</li>" for r in quality.get("reasons", []))
+dot = {"green":"🟢","orange":"🟠","red":"🔴"}.get(quality["status"], "⚪")
+reasons_list = "".join(f"<li>{html.escape(str(r))}</li>" for r in quality.get("reasons", []))
 reasons_html = f"<ul class='reasons'>{reasons_list}</ul>" if reasons_list else "<div>Keine Hinweise.</div>"
-
 _now = _now_berlin()
-session_name = {"morning":"Morgen‑Session (EU/FX/Metalle)",
-                "evening":"Abend‑Session (US/Commodities/FX)",
-                "regular":"Neutral (Top‑Scores)"}[detect_session(_now)]
+session_name = {"morning":"Morgen‑Session (EU/FX/Metalle)","evening":"Abend‑Session (US/Commodities/FX)","regular":"Neutral (Top‑Scores)"}[detect_session(_now)]
 
 topbar_html = f"""
 <div id="topbar">
@@ -1713,11 +1560,6 @@ topbar_html = f"""
         <div>
           <div><strong>Session:</strong> {session_name} <span style="opacity:.7;">({_now.tz_convert('Europe/Berlin'):%H:%M})</span></div>
           <div style="margin-top:.35rem;"><strong>Nächste Schritte:</strong> {html.escape(_next_actions(quality))}</div>
-          <div style="margin-top:.35rem;opacity:.8;">
-            #screenerScreener öffnen ·
-            #backtestBacktest starten ·
-            #volVolatilität
-          </div>
         </div>
       </div>
     </div>
@@ -1742,7 +1584,49 @@ eff_enable_short = True if params["code1_mode"] else params["enable_short"]
 eff_feature_norm = False if params["code1_mode"] else params["feature_norm"]
 atrn_min, atrn_max = eff_atrn_min_pct/100.0, eff_atrn_max_pct/100.0
 
+def compute_multipliers(hold_days: int, mode: str, base_stop: float = 1.0, base_tp: float = 1.8) -> Tuple[float, float, float]:
+    H = max(int(hold_days), 1)
+    if mode.startswith("√"):
+        f = float(np.sqrt(H))
+    elif mode.startswith("linear"):
+        f = float(H)
+    else:
+        f = 1.0
+    return base_stop*f, base_tp*f, 1.0*f
+
 stop_mult, tp_mult, trail_mult = compute_multipliers(eff_hold_days, params["scale_mode"])
+
+# =========================
+# Diagnose „Gewählt vs. Panel/Roh/Picks“
+# =========================
+with st.expander("🧩 Diagnose: Gewählt vs. Panel/Rohsignale/Picks", expanded=True):
+    selected = pd.Index(params.get("selected_plus500", []), dtype="object")
+    panel_syms = pd.Index(panel["OrigSymbol"].unique()) if (panel is not None and not panel.empty) else pd.Index([])
+    latest_df = st.session_state.get("latest_signals", pd.DataFrame())
+    raw_syms = pd.Index(latest_df["OrigSymbol"].unique()) if (latest_df is not None and not latest_df.empty) else pd.Index([])
+    picks_plan = st.session_state.get("latest_picks_plan", pd.DataFrame())
+    pick_syms = pd.Index(picks_plan["OrigSymbol"].unique()) if (picks_plan is not None and not picks_plan.empty) else pd.Index([])
+
+    diag = pd.DataFrame({"Plus500Name": selected})
+    diag["in_Panel"]      = diag["Plus500Name"].isin(panel_syms)
+    diag["in_Rohsignale"] = diag["Plus500Name"].isin(raw_syms)
+    diag["in_Picks"]      = diag["Plus500Name"].isin(pick_syms)
+    diag["Status"] = np.select(
+        [
+            ~diag["in_Panel"],
+            diag["in_Panel"] & ~diag["in_Rohsignale"],
+            diag["in_Rohsignale"] & ~diag["in_Picks"],
+            diag["in_Picks"],
+        ],
+        [
+            "❌ nicht im Panel (Download/Features)",
+            "⚠️ im Panel, aber kein Rohsignal (Datum/Live)",
+            "ℹ️ Rohsignal ohne Pick (Rules/Score/ATRN/Short)",
+            "✅ in Picks",
+        ],
+        default="–"
+    )
+    st.dataframe(diag, use_container_width=True, column_config=build_col_config(diag))
 
 # =========================
 # UI – Tabs
@@ -1750,49 +1634,49 @@ stop_mult, tp_mult, trail_mult = compute_multipliers(eff_hold_days, params["scal
 tab_screener, tab_vol, tab_backtest = st.tabs(["🔎 Screener", "📊 Volatilität", "🧪 Backtest"])
 
 # =========================
-# 🔎 Screener (mit Persistenz & Refresh-Pause)
+# 🔎 Screener
 # =========================
 with tab_screener:
     st.markdown('<a id="screener"></a>', unsafe_allow_html=True)
-    st.markdown("## 📈 Multi‑Symbol Screener (Haltedauer & Skalierung)" + hover_info_icon(
-        "Screener erzeugt Tages-Signale per Regeln + KI. FinalScore kombiniert Model-Wahrscheinlichkeit und Regel-Check."
-    ), unsafe_allow_html=True)
+    st.markdown("## 📈 Multi‑Symbol Screener (Haltedauer & Skalierung)" + hover_info_icon("Rohsignale + KI‑Score; Picks nach Score & Rules."), unsafe_allow_html=True)
 
-    run_screener = st.button("🚦 Screener jetzt ausführen", help="Erzeugt Rohsignale und gefilterte Picks auf Basis des geladenen Panels.", key="btn_screener")
+    # Quick‑Diagnose je Symbol
+    with st.expander("🔎 Quick‑Diagnose je Symbol (letzte 3 Zeilen)"):
+        name = st.text_input("Plus500-Name (z. B. GERMANY 40, GOLD, EUR/USD)")
+        if name:
+            dbg = panel[panel["OrigSymbol"].str.upper() == name.strip().upper()]
+            if dbg.empty:
+                st.info("Kein Panel-Eintrag – prüfe Mapping/Download.")
+            else:
+                show = dbg.sort_values("Date").tail(3)
+                st.dataframe(show, use_container_width=True, column_config=build_col_config(show))
+
+    run_screener = st.button("🚦 Screener jetzt ausführen", key="btn_screener")
     if run_screener:
         st.session_state["refresh_paused"] = True
 
         panel_for_screener = maybe_inject_live(panel, params["use_live_now"], int(params["live_interval_sec"]))
-
         latest, reports = train_and_score(
-            panel_for_screener, allow_short=eff_enable_short, debug=params["debug_mode"],
+            panel_for_screener, allow_short=eff_enable_short,
             use_horizon=eff_forecast_horizon, horizon_days=eff_hold_days, norm_features=eff_feature_norm
         )
         st.session_state["latest_signals"] = latest
         st.session_state["screener_reports"] = reports
 
-        st.markdown("**Heutige Roh‑Signale (vor Filter)**" + hover_info_icon(
-            "Roh-Signale inkl. AI_Prob_Up und Regelprüfung; noch ohne Score/ATRN-Filter."
-        ), unsafe_allow_html=True)
-
+        st.markdown("**Heutige Roh‑Signale (vor Filter)**")
         if latest.empty:
-            st.info("Keine Rohdaten verfügbar.")
+            last_panel_date = pd.to_datetime(panel["Date"]).max().date()
+            st.info(f"Keine Rohdaten sichtbar. Panel letzter Tag = {last_panel_date}. Prüfe Live-Schalter oder lade später (ab 22:15) erneut.")
         else:
-            cols = ["OrigSymbol","Symbol","Date","Close","EMA20","EMA50","RSI7","RSI14",
-                    "MACD_hist","MACD_hist_prev","ATR14","ATRN","VolZ20",
-                    "AI_Prob_Up","Direction","Rule_OK","AI_Prob","FinalScore"]
+            cols = ["OrigSymbol","Symbol","Date","Close","EMA20","EMA50","RSI7","RSI14","MACD_hist","MACD_hist_prev","ATR14","ATRN","VolZ20","AI_Prob_Up","Direction","Rule_OK","AI_Prob","FinalScore"]
             show_cols = [c for c in cols if c in latest.columns]
-            df_show = latest[show_cols]
-            st.dataframe(df_show, use_container_width=True, column_config=build_col_config(df_show))
-            st.caption("AI_Prob_Up = KI‑Wahrscheinlichkeit für Anstieg; für SHORT wird (1 − AI_Prob_Up) genutzt.")
+            st.dataframe(latest[show_cols], use_container_width=True, column_config=build_col_config(latest[show_cols]))
+            st.caption("AI_Prob_Up = KI‑Wahrscheinlichkeit für Anstieg (für SHORT wird 1 − AI_Prob_Up genutzt).")
 
-        st.markdown("**✅ Handelssignale & Tradeplan**" + hover_info_icon(
-            "Gefilterte Signale (Score & ATRN-Band). Tradeplan mit Stop/TP/Units; Stop/TP skaliert zur Haltedauer."
-        ), unsafe_allow_html=True)
-
+        st.markdown("**✅ Handelssignale & Tradeplan**")
         picks = latest[(latest["Rule_OK"]==1) & (latest["FinalScore"]>=eff_min_score) & (latest["Direction"]!="NO-TRADE")].copy()
         if picks.empty:
-            st.info(f"Keine handelbaren Signale (Filter: Score ≥ {eff_min_score:.2f}, ATRN {atrn_min*100:.1f}–{atrn_max*100:.1f} %).")
+            st.info(f"Keine handelbaren Signale (Score ≥ {eff_min_score:.2f}" + (f", ATRN {atrn_min*100:.1f}–{atrn_max*100:.1f}% aktiv im Rule‑Check)." if params.get("use_atrn_filter", True) else ", ATRN-Band derzeit NICHT im Rule‑Check)."))
             st.session_state["latest_picks_plan"] = pd.DataFrame()
             st.session_state["latest_rec_df"] = pd.DataFrame()
         else:
@@ -1808,20 +1692,18 @@ with tab_screener:
             ), axis=1)
             picks = pd.concat([picks, plan], axis=1)
             picks["AI_Prob"]=picks["AI_Prob"].round(3); picks["FinalScore"]=picks["FinalScore"].round(3); picks["ATRN_%"]=(picks["ATRN"]*100).round(3)
-            cols2 = ["OrigSymbol","Symbol","Date","Direction","FinalScore","AI_Prob","Close","EMA20","EMA50","RSI7","RSI14",
-                     "MACD_hist","ATR14","ATRN_%","VolZ20","EntryPrice_used","Stop","TakeProfit","Units_suggested","Time_Exit_By","Trailing"]
+
+            cols2 = ["OrigSymbol","Symbol","Date","Direction","FinalScore","AI_Prob","Close","EMA20","EMA50","RSI7","RSI14","MACD_hist","ATR14","ATRN_%","VolZ20","EntryPrice_used","Stop","TakeProfit","Units_suggested","Time_Exit_By","Trailing"]
             show_cols2 = [c for c in cols2 if c in picks.columns]
             df_plan = picks[show_cols2]
             st.dataframe(df_plan, use_container_width=True, column_config=build_col_config(df_plan))
-            st.download_button("Watchlist CSV", data=df_plan.to_csv(index=False).encode("utf-8"),
-                               file_name="watchlist_plus500_finder.csv", mime="text/csv")
+            st.download_button("Watchlist CSV", data=df_plan.to_csv(index=False).encode("utf-8"), file_name="watchlist_plus500_finder.csv", mime="text/csv")
             st.session_state["latest_picks_plan"] = df_plan
 
-            # Empfehlungen + Abend-Auto-Export
+            # Empfehlungen
             st.markdown("### 🧭 Empfehlungen je Tageszeit")
             _now_local = _now_berlin()
             session_name = {"morning":"Morgen‑Session (EU/FX/Metalle)","evening":"Abend‑Session (US/Commodities/FX)","regular":"Neutral (Top‑Scores)"}[detect_session(_now_local)]
-
             rec_df = recommend_by_session(picks, catalog_df)
             st.caption(f"Aktuell erkannt: **{session_name}** – lokale Zeit ({_now_local.tz_convert('Europe/Berlin'):%H:%M}).")
             if rec_df is None or rec_df.empty:
@@ -1830,80 +1712,54 @@ with tab_screener:
                 st.dataframe(rec_df, use_container_width=True, column_config=build_col_config(rec_df))
             st.session_state["latest_rec_df"] = rec_df
 
-        with st.expander("🔧 Cross‑Validation Reports (datum-basiert, purged)"):
-            st.text(reports)
+        with st.expander("🔧 Cross‑Validation Reports (datum‑basiert, purged)"):
+            st.text(st.session_state.get("screener_reports",""))
 
         with st.expander("🔎 GOLD‑Diagnose (letzte 3 Zeilen)"):
-            try:
-                latest_dbg = st.session_state.get("latest_signals", pd.DataFrame())
-                if not latest_dbg.empty:
-                    gold_mask = latest_dbg["OrigSymbol"].str.upper().isin(["GOLD","XAU","XAUUSD","GOLD/USD"])
-                    gold_dbg = latest_dbg.loc[gold_mask, [
-                        "OrigSymbol","Symbol","Date","Close",
-                        "EMA20","EMA50","RSI7","RSI14","MACD_hist","MACD_hist_prev",
-                        "ATR14","ATRN","VolZ20",
-                        "AI_Prob_Up","Direction","Rule_OK","AI_Prob","FinalScore"
-                    ]].sort_values("Date").tail(3)
-                    st.dataframe(gold_dbg, use_container_width=True, column_config=build_col_config(gold_dbg))
-            except Exception as e:
-                st.caption(f"GOLD‑Debug Fehler: {e}")
+            latest_dbg = st.session_state.get("latest_signals", pd.DataFrame())
+            if not latest_dbg.empty:
+                gold_mask = latest_dbg["OrigSymbol"].str.upper().isin(["GOLD","XAU","XAUUSD","GOLD/USD"])
+                gold_dbg = latest_dbg.loc[gold_mask, ["OrigSymbol","Symbol","Date","Close","EMA20","EMA50","RSI7","RSI14","MACD_hist","MACD_hist_prev","ATR14","ATRN","VolZ20","AI_Prob_Up","Direction","Rule_OK","AI_Prob","FinalScore"]].sort_values("Date").tail(3)
+                st.dataframe(gold_dbg, use_container_width=True, column_config=build_col_config(gold_dbg))
 
         with st.sidebar.expander("📤 Abend‑Auto‑Export (Watchlist)", expanded=False):
-            auto_export_toggle = st.checkbox("Abend‑Auto‑Export aktivieren (22:15–23:30)", value=False,
-                                             help="Speichert automatisch eine Watchlist‑CSV im Zeitfenster 22:15–23:30 (lokal).")
-            fname_prefix = st.text_input("Datei‑Präfix", value="watchlist_plus500", help="Wird dem Dateinamen vorangestellt.")
+            auto_export_toggle = st.checkbox("Abend‑Auto‑Export aktivieren (22:15–23:30)", value=False)
+            fname_prefix = st.text_input("Datei‑Präfix", value="watchlist_plus500")
             start_win = st.text_input("Fenster‑Start (HH:MM)", value="22:15")
             end_win   = st.text_input("Fenster‑Ende (HH:MM)",  value="23:30")
-
             if auto_export_toggle:
                 picks_for_export = st.session_state.get("latest_picks_plan", pd.DataFrame())
                 if picks_for_export is None or picks_for_export.empty:
                     st.warning("Kein Inhalt zum Exportieren (picks leer).")
                 else:
-                    exported = auto_export_watchlist(picks_for_export, filename_prefix=fname_prefix,
-                                                     window_start=start_win, window_end=end_win)
+                    exported = auto_export_watchlist(picks_for_export, filename_prefix=fname_prefix, window_start=start_win, window_end=end_win)
                     if exported:
                         st.success(f"Gespeichert: {exported}")
                         try:
-                            st.download_button("Exportierte Datei herunterladen", data=open(exported, "rb").read(),
-                                               file_name=exported, mime="text/csv")
+                            st.download_button("Exportierte Datei herunterladen", data=open(exported, "rb").read(), file_name=exported, mime="text/csv")
                         except Exception:
                             pass
                     else:
                         st.info("Warte auf Export‑Zeitfenster …")
-                        st.caption("Tipp: Kombiniere mit 'Auto‑Refresh', damit die App im Fenster automatisch speichert.")
 
     else:
         latest = st.session_state.get("latest_signals", pd.DataFrame())
         reports = st.session_state.get("screener_reports", "")
         if latest is not None and not latest.empty:
             st.info("Zeige zuletzt berechnete Screener-Ergebnisse (persistiert).")
-
-            st.markdown("**Heutige Roh‑Signale (vor Filter)**", unsafe_allow_html=True)
-            cols = ["OrigSymbol","Symbol","Date","Close","EMA20","EMA50","RSI7","RSI14",
-                    "MACD_hist","MACD_hist_prev","ATR14","ATRN","VolZ20",
-                    "AI_Prob_Up","Direction","Rule_OK","AI_Prob","FinalScore"]
+            cols = ["OrigSymbol","Symbol","Date","Close","EMA20","EMA50","RSI7","RSI14","MACD_hist","MACD_hist_prev","ATR14","ATRN","VolZ20","AI_Prob_Up","Direction","Rule_OK","AI_Prob","FinalScore"]
             show_cols = [c for c in cols if c in latest.columns]
-            df_show = latest[show_cols]
-            st.dataframe(df_show, use_container_width=True, column_config=build_col_config(df_show))
+            st.dataframe(latest[show_cols], use_container_width=True, column_config=build_col_config(latest[show_cols]))
 
-            st.markdown("**✅ Handelssignale & Tradeplan**", unsafe_allow_html=True)
+            st.markdown("**✅ Handelssignale & Tradeplan**")
             df_plan = st.session_state.get("latest_picks_plan", pd.DataFrame())
             if df_plan is None or df_plan.empty:
                 st.info("Keine persistierten handelbaren Signale.")
             else:
                 st.dataframe(df_plan, use_container_width=True, column_config=build_col_config(df_plan))
-                st.download_button("Watchlist CSV", data=df_plan.to_csv(index=False).encode("utf-8"),
-                                   file_name="watchlist_plus500_finder.csv", mime="text/csv")
-            with st.expander("🔧 Cross‑Validation Reports (datum-basiert, purged)"):
+                st.download_button("Watchlist CSV", data=df_plan.to_csv(index=False).encode("utf-8"), file_name="watchlist_plus500_finder.csv", mime="text/csv")
+            with st.expander("🔧 Cross‑Validation Reports (datum‑basiert, purged)"):
                 st.text(reports)
-
-            st.markdown("### 🧭 Empfehlungen je Tageszeit")
-            rec_df = st.session_state.get("latest_rec_df", pd.DataFrame())
-            if rec_df is None or rec_df.empty:
-                st.info("Keine passenden Empfehlungen für die letzte Session.")
-            else:
-                st.dataframe(rec_df, use_container_width=True, column_config=build_col_config(rec_df))
         else:
             st.info("Klicke auf **„🚦 Screener jetzt ausführen“**, nachdem die Daten geladen wurden.")
 
@@ -1912,9 +1768,7 @@ with tab_screener:
 # =========================
 with tab_vol:
     st.markdown('<a id="vol"></a>', unsafe_allow_html=True)
-    st.markdown("## 📊 Volatilitäts‑Monitor" + hover_info_icon(
-        "Übersicht zu aktueller und jüngster relativer Volatilität (ATRN)."
-    ), unsafe_allow_html=True)
+    st.markdown("## 📊 Volatilitäts‑Monitor" + hover_info_icon("Aktuelle ATRN‑Werte & Verlauf"), unsafe_allow_html=True)
 
     latest_date = panel["Date"].max()
     latest_rows = panel[panel["Date"]==latest_date].copy()
@@ -1945,13 +1799,11 @@ with tab_vol:
             st.line_chart(pivot)
 
 # =========================
-# 🧪 Backtest (mit Persistenz & Refresh-Pause)
+# 🧪 Backtest
 # =========================
 with tab_backtest:
     st.markdown('<a id="backtest"></a>', unsafe_allow_html=True)
-    st.markdown("## 🧪 Walk‑Forward Backtest" + hover_info_icon(
-        "Rollierendes Training bis Vortag (RandomForest), Signale je Tag, Simulation mit Stop/TP, Trailing (ATR_prev) und Time-Exit. Portfolio-Risikodeckel aktivierbar."
-    ), unsafe_allow_html=True)
+    st.markdown("## 🧪 Walk‑Forward Backtest" + hover_info_icon("Training bis Vortag, Signale je Tag, Simulation mit Stop/TP/Trailing/Time‑Exit."), unsafe_allow_html=True)
 
     cfg = get_model_config(params["fast_mode"], params["retrain_every_n"])
     st.caption(("Fast Mode: ~2 Jahre Fenster, selteneres Retraining, reduziertes Feature‑Set.")
@@ -1959,7 +1811,7 @@ with tab_backtest:
 
     bt_start = params["bt_start"]; bt_end = params["bt_end"]
 
-    run_bt = st.button("🚀 Backtest starten", type="primary", help="Startet Walk‑Forward‑Training und Handelssimulation für den gewählten Zeitraum.", key="btn_backtest")
+    run_bt = st.button("🚀 Backtest starten", type="primary", key="btn_backtest")
     if run_bt:
         st.session_state["refresh_paused"] = True
 
@@ -2013,14 +1865,11 @@ with tab_backtest:
                     st.dataframe(summary_df, use_container_width=True, column_config=build_col_config(summary_df))
 
                 st.markdown("**Trades (Detail)**")
-                show_cols = ["OrigSymbol","Symbol","Direction","EntryDate","EntryPrice","ATR14_atEntry","StopInit","TPInit",
-                             "ExitDate","ExitPrice","ExitReason","DaysHeld","PnL","R"]
+                show_cols = ["OrigSymbol","Symbol","Direction","EntryDate","EntryPrice","ATR14_atEntry","StopInit","TPInit","ExitDate","ExitPrice","ExitReason","DaysHeld","PnL","R"]
                 show_cols = [c for c in show_cols if c in trades_df.columns]
-                df_trades = trades_df[show_cols].sort_values(["EntryDate","OrigSymbol"])
-                st.dataframe(df_trades, use_container_width=True, column_config=build_col_config(df_trades))
+                st.dataframe(trades_df[show_cols].sort_values(["EntryDate","OrigSymbol"]), use_container_width=True, column_config=build_col_config(trades_df[show_cols]))
 
-                st.download_button("Trades als CSV", data=trades_df.to_csv(index=False).encode("utf-8"),
-                                   file_name="backtest_trades_plus500.csv", mime="text/csv")
+                st.download_button("Trades als CSV", data=trades_df.to_csv(index=False).encode("utf-8"), file_name="backtest_trades_plus500.csv", mime="text/csv")
 
                 st.markdown("### 🔬 Walk‑Forward Klassifikationsmetriken")
                 lbl_df = panel.copy()
@@ -2052,14 +1901,10 @@ with tab_backtest:
                                            np.where(sig_eval["Direction"]=="SHORT", 1.0-prob_up, 0.5))
                         y_pred = (p_trade >= 0.5).astype(int)
                         acc = (y_pred == y_true).mean()
-                        try:
-                            auc = roc_auc_score(y_true, p_trade)
-                        except Exception:
-                            auc = np.nan
-                        try:
-                            brier = brier_score_loss(y_true, p_trade)
-                        except Exception:
-                            brier = np.nan
+                        try:   auc = roc_auc_score(y_true, p_trade)
+                        except Exception: auc = np.nan
+                        try:   brier = brier_score_loss(y_true, p_trade)
+                        except Exception: brier = np.nan
 
                         c1, c2, c3 = st.columns(3)
                         c1.metric("Accuracy (Signale)", f"{acc*100:,.2f}%")
@@ -2107,8 +1952,7 @@ with tab_backtest:
                 st.dataframe(summary_df, use_container_width=True, column_config=build_col_config(summary_df))
 
             st.markdown("**Trades (Detail)**")
-            show_cols = ["OrigSymbol","Symbol","Direction","EntryDate","EntryPrice","ATR14_atEntry","StopInit","TPInit",
-                         "ExitDate","ExitPrice","ExitReason","DaysHeld","PnL","R"]
+            show_cols = ["OrigSymbol","Symbol","Direction","EntryDate","EntryPrice","ATR14_atEntry","StopInit","TPInit","ExitDate","ExitPrice","ExitReason","DaysHeld","PnL","R"]
             show_cols = [c for c in show_cols if c in trades_df.columns]
             df_trades = trades_df[show_cols].sort_values(["EntryDate","OrigSymbol"])
             st.dataframe(df_trades, use_container_width=True, column_config=build_col_config(df_trades))
