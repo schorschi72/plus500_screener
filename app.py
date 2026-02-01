@@ -14,8 +14,8 @@ Wissenschaftliche Strenge:
 
 Robustheit:
   - Mehrfach-Kandidaten je DataSymbol (kommagetrennt); erster funktionierender Ticker wird genutzt.
-  - GOLD-Fallback: 'GC=F' -> 'XAUUSD=X'; SILBER-Fallback: 'SI=F' -> 'XAGUSD=X'; PALLADIUM: 'PL=F' -> 'XPDUSD=X'.
-  - Index-Fallbacks auf ETF-Proxies (z. B. ^STOXX50E -> EXW1.DE; ^FCHI -> E40.PA; ^GDAXI -> EXS1.DE).
+  - GOLD-Fallback: 'GC=F' -> 'XAUUSD=X'; SILBER-Fallback: 'SI=F' -> 'XAGUSD=X'; PALLADIUM: 'PA=F' -> 'XPDUSD=X'.
+  - Index-Fallbacks auf ETF-Proxies (z. B. ^STOXX50E -> EXW1.DE; ^FCHI -> E40.PA; ^GDAXI -> EXS1.DE; ^DJI -> DIA; ^RUT -> IWM).
   - Normalisierung problematischer Ticker (z. B. '^FTSEMIB' -> 'FTSEMIB.MI').
   - Synthetische FX (GBPUSD) aus GBPEUR × EURUSD, wenn Direktticker ausfällt.
   - „🎛️ Code‑1‑Modus“: 1‑Tages‑Horizont, Haltedauer=1, min_score=0.55, ATRN=0.3–4.0%, SHORT an, Normierung aus.
@@ -54,6 +54,7 @@ from typing import List, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import finnhub
 import streamlit as st
 
 from sklearn.ensemble import RandomForestClassifier
@@ -462,23 +463,43 @@ def normalize_yahoo_symbol(sym: str) -> str:
     s = (sym or "").strip()
     u = s.upper()
 
-    # Indizes
+    # Indizes – Synonyme
     if u in {"^FTSEMIB", "FTSE MIB", "FTSE-MIB", "ITA40", "ITA 40"}:
         return "FTSEMIB.MI"
     if u in {"STOXX50E", "^EUROSTOXX50", "EURO STOXX 50"}:
         return "^STOXX50E"
-    if u in {"CAC40", "CAC 40"}:
+    if u in {"CAC40", "CAC 40", "FRANCE 40"}:
         return "^FCHI"
     if u in {"DAX", "GER40", "GERMANY 40", "GERMANY40"}:
         return "^GDAXI"
+    if u in {"US 30", "DOW", "DJIA"}:
+        return "^DJI"
+    if u in {"RUSSELL 2000", "US SMALL CAPS"}:
+        return "^RUT"
+    if u in {"NASDAQ", "NASDAQ COMPOSITE"}:
+        return "^IXIC"
+    if u in {"SPAIN 35", "IBEX35", "IBEX 35"}:
+        return "^IBEX"
+    if u in {"NETHERLANDS 25", "AEX 25"}:
+        return "^AEX"
+    if u in {"JAPAN 225", "NIKKEI 225"}:
+        return "^N225"
+    if u in {"HONG KONG 50", "HANG SENG"}:
+        return "^HSI"
 
-    # Metalle / Commodities
-    if u in {"SI=F", "SILVER FUTURES", "SILVER"}:
+    # Metalle / Commodities – Synonyme
+    if u in {"SILVER FUTURES", "SILVER"}:
         return "SI=F"
-    if u in {"PL=F", "PALLADIUM", "PALLADIUM FUTURES"}:
+    if u in {"PLATINUM", "PLATINUM FUTURES"}:
         return "PL=F"
+    if u in {"PALLADIUM", "PALLADIUM FUTURES"}:
+        return "PA=F"
     if u in {"XAU", "XAUUSD", "XAUUSD=X", "GOLD"}:
         return "XAUUSD=X"
+    if u in {"COPPER", "COPPER FUTURES"}:
+        return "HG=F"
+    if u in {"GASOLINE", "RBOB"}:
+        return "RB=F"
 
     # FX
     if u in {"GBPUSD", "GBP/USD"}:
@@ -499,7 +520,9 @@ class P5Item:
     MaxLeverage_Pro: float
     Notes: str = ""
 
+# >>>>>>>>>>>> ERWEITERTES STANDARD-SET <<<<<<<<<<<<
 P5_DEFAULTS: List[P5Item] = [
+    # ===== Bestehend =====
     # Indices
     P5Item("GERMANY 40","Indices","^GDAXI",1.0,20,300,"DAX Index Proxy"),
     P5Item("SWISS 20","Indices","^SSMI",0.1,20,300,"SMI Proxy"),
@@ -507,20 +530,67 @@ P5_DEFAULTS: List[P5Item] = [
     P5Item("US-TECH 100","Indices","^NDX",1.0,20,300,"NASDAQ 100 Proxy"),
     P5Item("UK 100","Indices","^FTSE",1.0,20,300,"FTSE 100 Proxy"),
     P5Item("ITALY 40","Indices","FTSEMIB.MI",1.0,20,300,"FTSE MIB Proxy"),
+
     # Commodities
     P5Item("OIL","Commodities","CL=F",1.0,10,150,"WTI Crude Futures"),
     P5Item("BRENT OIL","Commodities","BZ=F",1.0,10,150,"Brent Futures"),
     P5Item("NATURAL GAS","Commodities","NG=F",1.0,10,150,"Henry Hub NG"),
     P5Item("GOLD","Commodities","GC=F,XAUUSD=X",1.0,20,150,"Gold Futures -> Spot Fallback"),
     P5Item("SILVER","Commodities","SI=F,XAGUSD=X",1.0,10,150,"Silver Futures -> Spot Fallback"),
+
     # Forex
     P5Item("EUR/USD","Forex","EURUSD=X",100000.0,30,300,"FX Major"),
     P5Item("USD/JPY","Forex","USDJPY=X",100000.0,30,300,"FX Major"),
+
     # Crypto
     P5Item("BITCOIN/USD","Crypto","BTC-USD",1.0,2,20,"Spot Proxy"),
+
     # Shares
     P5Item("TESLA","Shares","TSLA",1.0,5,20,"US Share"),
     P5Item("APPLE","Shares","AAPL",1.0,5,20,"US Share"),
+
+    # ===== Neu hinzugefügt =====
+    # --- Indices (weitere) ---
+    P5Item("US 30","Indices","^DJI",1.0,20,300,"Dow Jones 30; ETF-Fallback DIA"),
+    P5Item("RUSSELL 2000","Indices","^RUT",1.0,20,300,"Small Caps; ETF-Fallback IWM"),
+    P5Item("NASDAQ COMPOSITE","Indices","^IXIC",1.0,20,300,"NASDAQ Composite"),
+    P5Item("EURO STOXX 50","Indices","^STOXX50E",1.0,20,300,"Eurozone Blue Chips; ETF EXW1.DE"),
+    P5Item("FRANCE 40","Indices","^FCHI",1.0,20,300,"CAC 40; ETF-Fallback E40.PA"),
+    P5Item("SPAIN 35","Indices","^IBEX",1.0,20,300,"IBEX 35 (ES)"),
+    P5Item("NETHERLANDS 25","Indices","^AEX",1.0,20,300,"AEX (NL)"),
+    P5Item("SWEDEN 30","Indices","^OMX",1.0,20,300,"OMX Stockholm 30"),
+    P5Item("JAPAN 225","Indices","^N225",1.0,20,300,"Nikkei 225"),
+    P5Item("HONG KONG 50","Indices","^HSI",1.0,20,300,"Hang Seng Index"),
+
+    # --- Commodities (weitere) ---
+    P5Item("COPPER","Commodities","HG=F",1.0,10,150,"COMEX Copper"),
+    P5Item("PLATINUM","Commodities","PL=F",1.0,10,150,"NYMEX Platinum"),
+    P5Item("PALLADIUM","Commodities","PA=F,XPDUSD=X",1.0,10,150,"NYMEX Palladium -> Spot Fallback"),
+    P5Item("GASOLINE (RBOB)","Commodities","RB=F,UGA",1.0,10,150,"RBOB Gasoline; ETF UGA"),
+    P5Item("HEATING OIL","Commodities","HO=F",1.0,10,150,"NY Harbor ULSD"),
+    P5Item("CORN","Commodities","ZC=F",1.0,10,150,"CBOT Corn"),
+    P5Item("WHEAT","Commodities","ZW=F",1.0,10,150,"CBOT Wheat"),
+
+    # --- Forex (mehr Majors/Minors) ---
+    P5Item("GBP/USD","Forex","GBPUSD=X",100000.0,30,300,"FX Major (synthetisch fähig)"),
+    P5Item("USD/CHF","Forex","USDCHF=X",100000.0,30,300,"FX Major"),
+    P5Item("USD/CAD","Forex","USDCAD=X",100000.0,30,300,"FX Major"),
+    P5Item("AUD/USD","Forex","AUDUSD=X",100000.0,30,300,"FX Major"),
+    P5Item("NZD/USD","Forex","NZDUSD=X",100000.0,30,300,"FX Major"),
+    P5Item("EUR/GBP","Forex","EURGBP=X",100000.0,30,300,"FX Cross"),
+    P5Item("EUR/JPY","Forex","EURJPY=X",100000.0,30,300,"FX Cross"),
+    P5Item("GBP/JPY","Forex","GBPJPY=X",100000.0,30,300,"FX Cross"),
+
+    # --- Crypto (mehr) ---
+    P5Item("ETHEREUM/USD","Crypto","ETH-USD",1.0,2,20,"Spot Proxy"),
+    P5Item("SOLANA/USD","Crypto","SOL-USD",1.0,2,20,"Spot Proxy"),
+
+    # --- Shares (einige liquide US-Titel) ---
+    P5Item("MICROSOFT","Shares","MSFT",1.0,5,20,"US Share"),
+    P5Item("NVIDIA","Shares","NVDA",1.0,5,20,"US Share"),
+    P5Item("AMAZON","Shares","AMZN",1.0,5,20,"US Share"),
+    P5Item("META","Shares","META",1.0,5,20,"US Share"),
+    P5Item("ALPHABET A","Shares","GOOGL",1.0,5,20,"US Share"),
 ]
 
 CATALOG_FILE = "plus500_catalog.csv"
@@ -935,19 +1005,27 @@ def explode_candidates(data_sym: str, orig_name: str) -> List[str]:
 
     norm_orig = _norm(orig_name)
 
-    # ETF/Spot-Fallbacks
+    # ETF/Spot-Fallbacks (ergänzt)
     if any(cs.upper()=="^STOXX50E" for cs in cands) or norm_orig in {"EURO STOXX 50","EUROSTOXX 50","STOXX50E"}:
         if "EXW1.DE" not in cands: cands.append("EXW1.DE")
     if any(cs.upper()=="^FCHI" for cs in cands) or norm_orig in {"FRANCE 40","CAC 40","CAC40"}:
         if "E40.PA" not in cands: cands.append("E40.PA")
     if any(cs.upper()=="^GDAXI" for cs in cands) or norm_orig in {"GERMANY 40","GER40","DAX"}:
         if "EXS1.DE" not in cands: cands.append("EXS1.DE")
-    if any(cs.upper()=="SI=F" for cs in cands) or norm_orig in {"SILVER","XAG","XAGUSD"}:
-        if "XAGUSD=X" not in cands: cands.append("XAGUSD=X")
-    if any(cs.upper()=="PL=F" for cs in cands) or norm_orig in {"PALLADIUM","XPD","XPDUSD"}:
-        if "XPDUSD=X" not in cands: cands.append("XPDUSD=X")
+    # neu:
+    if any(cs.upper()=="^DJI" for cs in cands) or norm_orig in {"US 30","DOW","DJIA"}:
+        if "DIA" not in cands: cands.append("DIA")
+    if any(cs.upper()=="^RUT" for cs in cands) or norm_orig in {"RUSSELL 2000","US SMALL CAPS"}:
+        if "IWM" not in cands: cands.append("IWM")
     if any(cs.upper()=="RB=F" for cs in cands) or norm_orig in {"RBOB","GASOLINE"}:
         if "UGA" not in cands: cands.append("UGA")
+    # Metalle Spot Fallbacks
+    if any(cs.upper()=="SI=F" for cs in cands) or norm_orig in {"SILVER","XAG","XAGUSD"}:
+        if "XAGUSD=X" not in cands: cands.append("XAGUSD=X")
+    # Palladium Spot-Fallback
+    if any(cs.upper()=="PA=F" for cs in cands) or norm_orig in {"PALLADIUM","XPD","XPDUSD"}:
+        if "XPDUSD=X" not in cands: cands.append("XPDUSD=X")
+    # Gold Spot-Fallback
     if (norm_orig in {"GOLD","XAU","XAUUSD","GOLD/USD"} or any(cs.upper()=="GC=F" for cs in cands)):
         if "XAUUSD=X" not in cands: cands.append("XAUUSD=X")
     return list(dict.fromkeys(cands))
