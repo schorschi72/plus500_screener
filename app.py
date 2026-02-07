@@ -54,7 +54,6 @@ from typing import List, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
-import finnhub
 import streamlit as st
 
 from sklearn.ensemble import RandomForestClassifier
@@ -520,7 +519,7 @@ class P5Item:
     MaxLeverage_Pro: float
     Notes: str = ""
 
-# >>>>>>>>>>>> ERWEITERTES STANDARD-SET <<<<<<<<<<<<
+# >>>>>>>>>>> ERWEITERTES STANDARD-SET <<<<<<<<<<
 P5_DEFAULTS: List[P5Item] = [
     # ===== Bestehend =====
     # Indices
@@ -645,9 +644,15 @@ with st.sidebar.form("params_form", clear_on_submit=False):
     selected_labels = st.multiselect("Titel suchen & auswählen (tippbar)", options=search_labels, default=(search_labels if sel_all else []))
     selected_plus500 = [lab2name[l] for l in selected_labels]
 
-    # Manuelle Ticker
+    # Manuelle Ticker (mobil-freundlich: Leerzeichen / Slash / Komma / Semikolon / Zeilenumbruch)
     with st.expander("Zusätzliche direkte Ticker (optional)", expanded=False):
-        manual_raw = st.text_area("Direkte Daten-Ticker (kommasepariert; z. B. CL=F, GC=F, FTSEMIB.MI)", value="", height=60)
+        manual_raw = st.text_area(
+            "Direkte Daten-Ticker (mit Leerzeichen, '/' , ',' , ';' oder Zeilenumbruch trennen – z. B. CL=F GC=F / FTSEMIB.MI)",
+            value="",
+            height=60
+        )
+        # Neuer mobiler Button innerhalb der Form – löst denselben Submit aus
+        submitted_tickers = st.form_submit_button("➕ Ticker übernehmen (mobil)")
 
     # Historie & Haltedauer & Skalierung & Forecast
     history_years = st.slider("Historie (Jahre)", 1, 10, 5, 1, help=HELP["history_years"])
@@ -694,11 +699,12 @@ with st.sidebar.form("params_form", clear_on_submit=False):
 
     debug_mode = st.checkbox("🪛 Debug-Ausgaben", value=False)
 
-    # Form-Submit
+    # Form-Submit (zusätzlich: mobiler Submit-Button für Ticker)
     submitted = st.form_submit_button("✅ Einstellungen übernehmen")
+    submitted_any = submitted or submitted_tickers
 
 # Übernommene Settings einfrieren
-if submitted:
+if submitted_any:
     st.session_state["params"] = dict(
         sel_cat=sel_cat, acct_type=acct_type, min_leverage=min_leverage, max_leverage=max_leverage, lev_col=lev_col,
         selected_plus500=selected_plus500, manual_raw=manual_raw,
@@ -743,7 +749,8 @@ params = st.session_state["params"]
 catalog_df = load_catalog()
 
 symbol_rows = catalog_df[catalog_df["Plus500Name"].isin(params["selected_plus500"])].copy()
-for t in re.split(r"[\s,;]+", params["manual_raw"].strip()):
+# Separator mobil-freundlich: Leerzeichen, Slash "/", Semikolon, Komma, Zeilenumbruch
+for t in re.split(r"[\s/;,]+", params["manual_raw"].strip()):
     if t:
         symbol_rows = pd.concat([symbol_rows, pd.DataFrame([{
             "Plus500Name": t.strip(), "Category": "Manual",
@@ -1333,16 +1340,6 @@ def walkforward_signals(panel: pd.DataFrame, allow_short: bool, use_ai: bool, cf
 # =========================
 # Tradeplan & Backtest
 # =========================
-def compute_multipliers(hold_days: int, mode: str, base_stop: float = 1.0, base_tp: float = 1.8) -> Tuple[float, float, float]:
-    H = max(int(hold_days), 1)
-    if mode.startswith("√"):
-        f = float(np.sqrt(H))
-    elif mode.startswith("linear"):
-        f = float(H)
-    else:
-        f = 1.0
-    return base_stop*f, base_tp*f, 1.0*f
-
 def compute_trade_plan(row, equity, risk_frac, pv_map: Dict[str,float],
                        use_time_exit=True, use_trailing=True,
                        hold_days: int = 2,
