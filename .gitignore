@@ -1,0 +1,63 @@
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+
+# Byte-compiled / optimized / DLL files
+*.so
+
+# -------------------------
+# Virtual Environments
+# -------------------------
+.venv/
+venv/
+env/
+
+# -------------------------
+# Streamlit
+# -------------------------
+.streamlit/cache/
+.streamlit/secrets.toml
+
+# -------------------------
+# OS / Editor / IDE
+# -------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# -------------------------
+# Logs / Temp
+# -------------------------
+*.log
+*.tmp
+*.bak
+
+# -------------------------
+# Data / Exports
+# -------------------------
+*.csv
+*.xlsx
+exports/
+backtests/
+watchlists/
+data/
+output/
+
+# -------------------------
+# Jupyter (falls vorhanden)
+# -------------------------
+.ipynb_checkpoints/
+
+# -------------------------
+# Misc
+# -------------------------
+*.swp
+*.swo
+# created by virtualenv automatically
+*
