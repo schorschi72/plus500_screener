@@ -144,8 +144,9 @@ HELP = {
     # Konto / Risiko / Filter
     "equity": "Kontogröße (Equity) für Positionsgrößen & Backtest.",
     "risk_pct": "Positionsgröße = (Equity × Risiko%) ÷ (Stopdistanz × Punktewert).",
+    "risk_level": "Risikobereitschaft steuert Score‑Gewichtung & Signalselektion: 1=moderat, 5=extrem hohes Risiko.",
     "enable_short": "SHORTs erlauben.",
-    "min_score": "FinalScore‑Schwelle: 0.7×AI_Prob + 0.3×Rule_OK.",
+    "min_score": "FinalScore‑Schwelle (risikoabhängig gewichtet aus AI_Prob und Rule_OK).",
     "time_exit": "Schließt Position spätestens nach H Tagen.",
     "trailing": "Trailing mit ATR vom Vortag (kein Intraday‑Look‑Ahead).",
     "atrn_minmax": "ATRN‑Band (ATR/Close). Code‑1: 0.3–4.0%.",
@@ -172,6 +173,14 @@ HELP = {
     # Trader‑Erweitert
     "use_atrn_filter": "ATRN‑Band im Rule‑Check anwenden (an/aus).",
     "min_rows_first_ok": "Minimale Historie (Zeilen) für ersten funktionierenden Ticker (Default 20).",
+}
+
+RISK_LABELS = {
+    1: "moderat",
+    2: "leicht erhöht",
+    3: "ausgewogen",
+    4: "hoch",
+    5: "extrem hohes Risiko",
 }
 
 # =========================
@@ -657,6 +666,8 @@ with st.sidebar.form("params_form", clear_on_submit=False):
     # Historie & Haltedauer & Skalierung & Forecast
     history_years = st.slider("Historie (Jahre)", 1, 10, 5, 1, help=HELP["history_years"])
     hold_days = st.slider("Haltedauer (Tage, Time-Exit)", 1, 10, 2, 1, help=HELP["hold_days"])
+    risk_level = st.slider("Risikobereitschaft", 1, 5, 3, 1, help=HELP["risk_level"])
+    st.caption(f"Risikoprofil: **{risk_level} = {RISK_LABELS[risk_level]}**")
     scale_mode = st.selectbox("Skalierung Stop/TP/Trailing", ["√Zeit (empfohlen)", "linear", "keine"], index=0, help=HELP["scale_mode"])
     forecast_horizon_days = st.checkbox("KI-Prognose auf Haltedauer H (statt 1 Tag)", value=True, help=HELP["forecast_horizon"])
 
@@ -708,7 +719,7 @@ if submitted_any:
     st.session_state["params"] = dict(
         sel_cat=sel_cat, acct_type=acct_type, min_leverage=min_leverage, max_leverage=max_leverage, lev_col=lev_col,
         selected_plus500=selected_plus500, manual_raw=manual_raw,
-        history_years=history_years, hold_days=hold_days, scale_mode=scale_mode,
+        history_years=history_years, hold_days=hold_days, risk_level=int(risk_level), scale_mode=scale_mode,
         forecast_horizon_days=forecast_horizon_days, account_equity=account_equity, risk_per_trade=risk_per_trade,
         enable_short=enable_short, min_score=min_score, use_time_exit=use_time_exit, use_trailing=use_trailing,
         atrn_min_pct=atrn_min_pct, atrn_max_pct=atrn_max_pct, cost_per_trade=cost_per_trade, stop_first=stop_first,
@@ -1200,11 +1211,20 @@ def _apply_feature_norm(df: pd.DataFrame, feats: List[str], enabled: bool) -> Tu
     feats_z = [f + "_z" for f in feats]
     return df_norm, feats_z
 
+def get_risk_profile(risk_level: int) -> Tuple[float, float, float]:
+    lvl = int(np.clip(risk_level, 1, 5))
+    tilt = (lvl - 3) / 2.0
+    ai_weight = 0.7 + 0.1 * tilt
+    rule_weight = 1.0 - ai_weight
+    min_score_shift = -0.03 * tilt
+    return ai_weight, rule_weight, min_score_shift
+
 # =========================
 # KI: Screener & Walk-Forward
 # =========================
 def train_and_score(panel: pd.DataFrame, allow_short: bool=True, debug: bool=False,
-                    use_horizon: bool=True, horizon_days: int=2, norm_features: bool=False):
+                    use_horizon: bool=True, horizon_days: int=2, norm_features: bool=False,
+                    risk_level: int = 3):
     if panel is None or panel.empty:
         return pd.DataFrame(), "Keine Daten."
     base_features = ["RSI7","RSI14","MACD","MACD_signal","MACD_hist",
@@ -1263,7 +1283,8 @@ def train_and_score(panel: pd.DataFrame, allow_short: bool=True, debug: bool=Fal
     latest["Rule_OK"]   = rules
     latest["AI_Prob"]   = np.where(latest["Direction"]=="LONG", latest["AI_Prob_Up"],
                              np.where(latest["Direction"]=="SHORT", 1.0-latest["AI_Prob_Up"], 0.0))
-    latest["FinalScore"]= 0.7*latest["AI_Prob"] + 0.3*latest["Rule_OK"]
+    ai_w, rule_w, _ = get_risk_profile(risk_level)
+    latest["FinalScore"]= ai_w*latest["AI_Prob"] + rule_w*latest["Rule_OK"]
     return latest.sort_values(["FinalScore","OrigSymbol"], ascending=[False, True]), "\n\n".join(reports) if reports else "Keine aussagekräftigen CV-Folds."
 
 def get_model_config(fast: bool, retrain_user: int) -> Dict:
@@ -1279,7 +1300,8 @@ def get_model_config(fast: bool, retrain_user: int) -> Dict:
                 "feature_subset":None}
 
 def walkforward_signals(panel: pd.DataFrame, allow_short: bool, use_ai: bool, cfg: Dict,
-                        use_horizon: bool=True, horizon_days: int=2, norm_features: bool=False) -> pd.DataFrame:
+                        use_horizon: bool=True, horizon_days: int=2, norm_features: bool=False,
+                        risk_level: int = 3) -> pd.DataFrame:
     if panel is None or panel.empty: return pd.DataFrame()
     full = ["RSI7","RSI14","MACD","MACD_signal","MACD_hist","EMA20","EMA50",
             "Dist_EMA20","Dist_EMA50","ATRN","VolZ20","ROC3","BreakoutUp","BreakoutDn","Ret_1D"]
@@ -1296,6 +1318,7 @@ def walkforward_signals(panel: pd.DataFrame, allow_short: bool, use_ai: bool, cf
     df = df.dropna(subset=feats + ["Label"])
 
     dates = sorted(pd.to_datetime(df["Date"]).dt.tz_localize(None).unique())
+    ai_w, rule_w, _ = get_risk_profile(risk_level)
     out = []; last_trained = None; clf = None
     for d in dates:
         d = pd.to_datetime(d).tz_localize(None)
@@ -1332,7 +1355,7 @@ def walkforward_signals(panel: pd.DataFrame, allow_short: bool, use_ai: bool, cf
         day["Rule_OK"]   = rules
         day["AI_Prob"]   = np.where(day["Direction"]=="LONG", day["AI_Prob_Up"],
                                np.where(day["Direction"]=="SHORT", 1.0-day["AI_Prob_Up"], 0.0))
-        day["FinalScore"]= 0.7*day["AI_Prob"] + 0.3*day["Rule_OK"]
+        day["FinalScore"]= ai_w*day["AI_Prob"] + rule_w*day["Rule_OK"]
         out.append(day)
 
     return pd.concat(out).reset_index(drop=True) if out else pd.DataFrame()
@@ -1652,7 +1675,10 @@ render_quality_box(quality)
 # =========================
 eff_hold_days = 1 if params["code1_mode"] else params["hold_days"]
 eff_forecast_horizon = False if params["code1_mode"] else params["forecast_horizon_days"]
-eff_min_score = 0.55 if params["code1_mode"] else params["min_score"]
+eff_risk_level = int(params.get("risk_level", 3))
+_, _, risk_min_score_shift = get_risk_profile(eff_risk_level)
+eff_min_score_base = 0.55 if params["code1_mode"] else params["min_score"]
+eff_min_score = float(np.clip(eff_min_score_base + risk_min_score_shift, 0.50, 0.90))
 eff_atrn_min_pct = 0.3 if params["code1_mode"] else params["atrn_min_pct"]
 eff_atrn_max_pct = 4.0 if params["code1_mode"] else params["atrn_max_pct"]
 eff_enable_short = True if params["code1_mode"] else params["enable_short"]
@@ -1714,6 +1740,7 @@ tab_screener, tab_vol, tab_backtest = st.tabs(["🔎 Screener", "📊 Volatilit�
 with tab_screener:
     st.markdown('<a id="screener"></a>', unsafe_allow_html=True)
     st.markdown("## 📈 Multi‑Symbol Screener (Haltedauer & Skalierung)" + hover_info_icon("Rohsignale + KI‑Score; Picks nach Score & Rules."), unsafe_allow_html=True)
+    st.caption(f"Risikobereitschaft aktiv: **{eff_risk_level} ({RISK_LABELS.get(eff_risk_level, 'ausgewogen')})** · effektiver Mindest‑Score: **{eff_min_score:.2f}**")
 
     # Quick‑Diagnose je Symbol
     with st.expander("🔎 Quick‑Diagnose je Symbol (letzte 3 Zeilen)"):
@@ -1733,7 +1760,8 @@ with tab_screener:
         panel_for_screener = maybe_inject_live(panel, params["use_live_now"], int(params["live_interval_sec"]))
         latest, reports = train_and_score(
             panel_for_screener, allow_short=eff_enable_short,
-            use_horizon=eff_forecast_horizon, horizon_days=eff_hold_days, norm_features=eff_feature_norm
+            use_horizon=eff_forecast_horizon, horizon_days=eff_hold_days,
+            norm_features=eff_feature_norm, risk_level=eff_risk_level
         )
         st.session_state["latest_signals"] = latest
         st.session_state["screener_reports"] = reports
@@ -1751,7 +1779,7 @@ with tab_screener:
         st.markdown("**✅ Handelssignale & Tradeplan**")
         picks = latest[(latest["Rule_OK"]==1) & (latest["FinalScore"]>=eff_min_score) & (latest["Direction"]!="NO-TRADE")].copy()
         if picks.empty:
-            st.info(f"Keine handelbaren Signale (Score ≥ {eff_min_score:.2f}" + (f", ATRN {atrn_min*100:.1f}–{atrn_max*100:.1f}% aktiv im Rule‑Check)." if params.get("use_atrn_filter", True) else ", ATRN-Band derzeit NICHT im Rule‑Check)."))
+            st.info(f"Keine handelbaren Signale (Risiko {eff_risk_level}= {RISK_LABELS.get(eff_risk_level, 'ausgewogen')}, Score ≥ {eff_min_score:.2f}" + (f", ATRN {atrn_min*100:.1f}–{atrn_max*100:.1f}% aktiv im Rule‑Check)." if params.get("use_atrn_filter", True) else ", ATRN-Band derzeit NICHT im Rule‑Check)."))
             st.session_state["latest_picks_plan"] = pd.DataFrame()
             st.session_state["latest_rec_df"] = pd.DataFrame()
         else:
@@ -1893,7 +1921,8 @@ with tab_backtest:
         with st.spinner("Trainiere & simuliere…"):
             signals_all = walkforward_signals(
                 panel, allow_short=eff_enable_short, use_ai=params["use_ai_in_bt"], cfg=cfg,
-                use_horizon=eff_forecast_horizon, horizon_days=eff_hold_days, norm_features=eff_feature_norm
+                use_horizon=eff_forecast_horizon, horizon_days=eff_hold_days,
+                norm_features=eff_feature_norm, risk_level=eff_risk_level
             )
             trades_df, summary_df, eq = backtest(
                 panel=panel, signals=signals_all,
