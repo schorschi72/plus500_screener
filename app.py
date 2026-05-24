@@ -28,8 +28,8 @@ Robustheit:
 
 NEU (Gating-Logik, Stabilitäts-Patches):
   - Alle Einstellungen zuerst in einer Form übernehmen („✅ Einstellungen übernehmen“).
-  - Mit „✅ Einstellungen übernehmen“ werden Panel/Daten direkt gebaut.
-  - Screener wird nur per Button „🚦 Screener jetzt ausführen“ gerechnet.
+  - Mit „✅ Einstellungen übernehmen“ werden Panel/Daten direkt gebaut und der Screener automatisch gerechnet.
+  - Button „🚦 Screener jetzt ausführen“ bleibt für manuelle Neu-Berechnung verfügbar.
   - Backtest startet nur per Button „🚀 Backtest starten“.
   - Auto-Refresh pausiert automatisch während Screener/Backtest; Ergebnisse werden persistiert.
   - Sidebar-Button „🔄 Auto‑Refresh wieder aktivieren“ hebt die Pause wieder auf.
@@ -740,9 +740,9 @@ if submitted_any:
     st.session_state["params_ready"] = True
 
 # Hinweis & Ablauf
-st.markdown("### 🚦 Ablauf: 1) Einstellungen übernehmen (lädt Daten) → 2) Screener/Backtest")
+st.markdown("### 🚦 Ablauf: 1) Einstellungen übernehmen (lädt Daten + startet Screener) → 2) optional Backtest")
 if not st.session_state.get("params_ready"):
-    st.info("Bitte zuerst in der Sidebar **„Einstellungen übernehmen“** klicken. Danach werden die Daten direkt geladen.")
+    st.info("Bitte zuerst in der Sidebar **„Einstellungen übernehmen“** klicken. Danach werden die Daten geladen und der Screener automatisch ausgeführt.")
     st.stop()
 
 # =========================
@@ -1758,7 +1758,7 @@ with tab_screener:
                 st.dataframe(show, use_container_width=True, column_config=build_col_config(show))
 
     st.markdown("### 1) Screener ausführen")
-    run_screener = st.button("🚦 Screener jetzt ausführen", key="btn_screener")
+    run_screener = submitted_any or st.button("🚦 Screener jetzt ausführen", key="btn_screener")
     if run_screener:
         st.session_state["refresh_paused"] = True
 
@@ -1872,7 +1872,7 @@ with tab_screener:
                 with st.expander("🔧 Cross‑Validation Reports (datum‑basiert, purged)"):
                     st.text(reports)
         else:
-            st.info("Klicke auf **„🚦 Screener jetzt ausführen“**, nachdem du in der Sidebar **„Einstellungen übernehmen“** geklickt hast.")
+            st.info("Klicke in der Sidebar auf **„Einstellungen übernehmen“** (lädt Daten + startet den Screener automatisch) oder nutze **„🚦 Screener jetzt ausführen“** für einen erneuten Lauf.")
 
 # =========================
 # 📊 Volatilität
