@@ -28,7 +28,7 @@ Robustheit:
 
 NEU (Gating-Logik, Stabilitäts-Patches):
   - Alle Einstellungen zuerst in einer Form übernehmen („✅ Einstellungen übernehmen“).
-  - Panel/Daten werden nur per Button „🔁 Daten laden/aktualisieren“ gebaut.
+  - Mit „✅ Einstellungen übernehmen“ werden Panel/Daten direkt gebaut.
   - Screener wird nur per Button „🚦 Screener jetzt ausführen“ gerechnet.
   - Backtest startet nur per Button „🚀 Backtest starten“.
   - Auto-Refresh pausiert automatisch während Screener/Backtest; Ergebnisse werden persistiert.
@@ -801,7 +801,7 @@ if resume_refresh:
     st.experimental_rerun()
 
 # =========================
-# Daten laden / Reset
+# Daten laden (beim Übernehmen) / Reset
 # =========================
 START_DATE = (pd.Timestamp.today() - pd.DateOffset(years=params["history_years"])).strftime("%Y-%m-%d")
 
@@ -812,19 +812,15 @@ for _, r in symbol_rows.iterrows():
     if orig and data:
         symbols_map[orig] = data
 
-colA, colB = st.columns([1,1])
-with colA:
-    do_load_clicked = st.button("🔁 Daten laden/aktualisieren", type="primary", key="btn_load")
-with colB:
-    do_reset = st.button("🧹 Reset (Panel/Signale)", key="btn_reset")
-do_load = do_load_clicked or submitted_any
+do_reset = st.button("🧹 Reset (Panel/Signale)", key="btn_reset")
+do_load = submitted_any
 
 if do_reset:
     for k in ["panel", "signals_all", "latest_signals", "screener_reports",
               "latest_picks_plan", "latest_rec_df", "last_signals_all",
               "last_backtest_trades", "last_backtest_summary", "last_backtest_eq"]:
         st.session_state.pop(k, None)
-    st.success("Zurückgesetzt. Bitte erneut Daten laden.")
+    st.success("Zurückgesetzt. Bitte in der Sidebar erneut „Einstellungen übernehmen“.")
     st.stop()
 
 # --- Diagnose-Expander: yfinance-Test & Cache-Clear ---
@@ -1587,7 +1583,7 @@ def backtest(panel: pd.DataFrame, signals: pd.DataFrame, equity_start: float, ri
     return trades_df, summary, eq_series
 
 # =========================
-# Daten laden (nur per Button)
+# Daten laden (bei Einstellungen übernehmen)
 # =========================
 if do_load:
     if not symbols_map:
@@ -1876,7 +1872,7 @@ with tab_screener:
                 with st.expander("🔧 Cross‑Validation Reports (datum‑basiert, purged)"):
                     st.text(reports)
         else:
-            st.info("Klicke auf **„🚦 Screener jetzt ausführen“**, nachdem die Daten geladen wurden.")
+            st.info("Klicke auf **„🚦 Screener jetzt ausführen“**, nachdem du in der Sidebar **„Einstellungen übernehmen“** geklickt hast.")
 
 # =========================
 # 📊 Volatilität
