@@ -622,13 +622,15 @@ st.sidebar.header("🧭 Plus500‑Finder")
 
 with st.sidebar.form("params_form", clear_on_submit=False):
     catalog_df = load_catalog()
+    st.caption("Workflow: 1) Universum wählen · 2) Setup einstellen · 3) Einstellungen übernehmen")
 
+    st.markdown("### 1) Marktuniversum")
     # Kategorie
     cats = ["Alle"] + sorted(catalog_df["Category"].dropna().unique().tolist())
     sel_cat = st.selectbox("Kategorie", options=cats, index=0)
 
     # Konto‑Typ & Hebel‑Band
-    st.markdown("### Konto‑Typ & Hebel‑Filter")
+    st.markdown("#### Konto‑Typ & Hebel‑Filter")
     acct_type = st.radio("Konto‑Typ", ["Retail (ESMA)", "Professional"], index=0, help=HELP["acct_type"])
     min_leverage, max_leverage = st.slider("Hebel-Band (Min–Max)", min_value=2, max_value=300, value=(2, 300), step=1)
     lev_col = "MaxLeverage_Pro" if acct_type == "Professional" else "MaxLeverage_Retail"
@@ -663,6 +665,8 @@ with st.sidebar.form("params_form", clear_on_submit=False):
         # Neuer mobiler Button innerhalb der Form – löst denselben Submit aus
         submitted_tickers = st.form_submit_button("➕ Ticker übernehmen (mobil)")
 
+    st.divider()
+    st.markdown("### 2) Strategie‑Setup")
     # Historie & Haltedauer & Skalierung & Forecast
     history_years = st.slider("Historie (Jahre)", 1, 10, 5, 1, help=HELP["history_years"])
     hold_days = st.slider("Haltedauer (Tage, Time-Exit)", 1, 10, 2, 1, help=HELP["hold_days"])
@@ -689,6 +693,8 @@ with st.sidebar.form("params_form", clear_on_submit=False):
         feature_norm     = st.checkbox("Feature‑Normierung (z‑Score je Symbol)", value=False, help=HELP["feature_norm"])
         max_total_risk_multiple = st.slider("Max. Gesamt‑Risiko (× Einzetrisiko)", 1.0, 5.0, 2.0, 0.5, help=HELP["max_port_risk"])
 
+    st.divider()
+    st.markdown("### 3) Modus, Live & Backtest")
     # Code-1‑Modus
     code1_mode = st.checkbox("🎛️ Code‑1‑Modus (Angleichen an Code 1)", value=False, help=HELP["code1_mode"])
 
@@ -1700,7 +1706,7 @@ stop_mult, tp_mult, trail_mult = compute_multipliers(eff_hold_days, params["scal
 # =========================
 # Diagnose „Gewählt vs. Panel/Roh/Picks“
 # =========================
-with st.expander("🧩 Diagnose: Gewählt vs. Panel/Rohsignale/Picks", expanded=True):
+with st.expander("🧩 Diagnose: Gewählt vs. Panel/Rohsignale/Picks", expanded=False):
     selected = pd.Index(params.get("selected_plus500", []), dtype="object")
     panel_syms = pd.Index(panel["OrigSymbol"].unique()) if (panel is not None and not panel.empty) else pd.Index([])
     latest_df = st.session_state.get("latest_signals", pd.DataFrame())
@@ -1741,6 +1747,7 @@ with tab_screener:
     st.markdown('<a id="screener"></a>', unsafe_allow_html=True)
     st.markdown("## 📈 Multi‑Symbol Screener (Haltedauer & Skalierung)" + hover_info_icon("Rohsignale + KI‑Score; Picks nach Score & Rules."), unsafe_allow_html=True)
     st.caption(f"Risikobereitschaft aktiv: **{eff_risk_level} ({RISK_LABELS.get(eff_risk_level, 'ausgewogen')})** · effektiver Mindest‑Score: **{eff_min_score:.2f}**")
+    st.info("Ablauf im Screener: **1) Starten** → **2) Rohsignale prüfen** → **3) Handelssignale & Plan nutzen**")
 
     # Quick‑Diagnose je Symbol
     with st.expander("🔎 Quick‑Diagnose je Symbol (letzte 3 Zeilen)"):
@@ -1753,6 +1760,7 @@ with tab_screener:
                 show = dbg.sort_values("Date").tail(3)
                 st.dataframe(show, use_container_width=True, column_config=build_col_config(show))
 
+    st.markdown("### 1) Screener ausführen")
     run_screener = st.button("🚦 Screener jetzt ausführen", key="btn_screener")
     if run_screener:
         st.session_state["refresh_paused"] = True
@@ -1766,7 +1774,7 @@ with tab_screener:
         st.session_state["latest_signals"] = latest
         st.session_state["screener_reports"] = reports
 
-        st.markdown("**Heutige Roh‑Signale (vor Filter)**")
+        st.markdown("### 2) Heutige Roh‑Signale (vor Filter)")
         if latest.empty:
             last_panel_date = pd.to_datetime(panel["Date"]).max().date()
             st.info(f"Keine Rohdaten sichtbar. Panel letzter Tag = {last_panel_date}. Prüfe Live-Schalter oder lade später (ab 22:15) erneut.")
@@ -1776,7 +1784,7 @@ with tab_screener:
             st.dataframe(latest[show_cols], use_container_width=True, column_config=build_col_config(latest[show_cols]))
             st.caption("AI_Prob_Up = KI‑Wahrscheinlichkeit für Anstieg (für SHORT wird 1 − AI_Prob_Up genutzt).")
 
-        st.markdown("**✅ Handelssignale & Tradeplan**")
+        st.markdown("### 3) ✅ Handelssignale & Tradeplan")
         picks = latest[(latest["Rule_OK"]==1) & (latest["FinalScore"]>=eff_min_score) & (latest["Direction"]!="NO-TRADE")].copy()
         if picks.empty:
             st.info(f"Keine handelbaren Signale (Risiko {eff_risk_level}= {RISK_LABELS.get(eff_risk_level, 'ausgewogen')}, Score ≥ {eff_min_score:.2f}" + (f", ATRN {atrn_min*100:.1f}–{atrn_max*100:.1f}% aktiv im Rule‑Check)." if params.get("use_atrn_filter", True) else ", ATRN-Band derzeit NICHT im Rule‑Check)."))
@@ -1804,7 +1812,7 @@ with tab_screener:
             st.session_state["latest_picks_plan"] = df_plan
 
             # Empfehlungen
-            st.markdown("### 🧭 Empfehlungen je Tageszeit")
+            st.markdown("### 4) 🧭 Empfehlungen je Tageszeit")
             _now_local = _now_berlin()
             session_name = {"morning":"Morgen‑Session (EU/FX/Metalle)","evening":"Abend‑Session (US/Commodities/FX)","regular":"Neutral (Top‑Scores)"}[detect_session(_now_local)]
             rec_df = recommend_by_session(picks, catalog_df)
@@ -1815,15 +1823,16 @@ with tab_screener:
                 st.dataframe(rec_df, use_container_width=True, column_config=build_col_config(rec_df))
             st.session_state["latest_rec_df"] = rec_df
 
-        with st.expander("🔧 Cross‑Validation Reports (datum‑basiert, purged)"):
-            st.text(st.session_state.get("screener_reports",""))
+        with st.expander("5) Reports & Diagnosen", expanded=False):
+            with st.expander("🔧 Cross‑Validation Reports (datum‑basiert, purged)"):
+                st.text(st.session_state.get("screener_reports",""))
 
-        with st.expander("🔎 GOLD‑Diagnose (letzte 3 Zeilen)"):
-            latest_dbg = st.session_state.get("latest_signals", pd.DataFrame())
-            if not latest_dbg.empty:
-                gold_mask = latest_dbg["OrigSymbol"].str.upper().isin(["GOLD","XAU","XAUUSD","GOLD/USD"])
-                gold_dbg = latest_dbg.loc[gold_mask, ["OrigSymbol","Symbol","Date","Close","EMA20","EMA50","RSI7","RSI14","MACD_hist","MACD_hist_prev","ATR14","ATRN","VolZ20","AI_Prob_Up","Direction","Rule_OK","AI_Prob","FinalScore"]].sort_values("Date").tail(3)
-                st.dataframe(gold_dbg, use_container_width=True, column_config=build_col_config(gold_dbg))
+            with st.expander("🔎 GOLD‑Diagnose (letzte 3 Zeilen)"):
+                latest_dbg = st.session_state.get("latest_signals", pd.DataFrame())
+                if not latest_dbg.empty:
+                    gold_mask = latest_dbg["OrigSymbol"].str.upper().isin(["GOLD","XAU","XAUUSD","GOLD/USD"])
+                    gold_dbg = latest_dbg.loc[gold_mask, ["OrigSymbol","Symbol","Date","Close","EMA20","EMA50","RSI7","RSI14","MACD_hist","MACD_hist_prev","ATR14","ATRN","VolZ20","AI_Prob_Up","Direction","Rule_OK","AI_Prob","FinalScore"]].sort_values("Date").tail(3)
+                    st.dataframe(gold_dbg, use_container_width=True, column_config=build_col_config(gold_dbg))
 
         with st.sidebar.expander("📤 Abend‑Auto‑Export (Watchlist)", expanded=False):
             auto_export_toggle = st.checkbox("Abend‑Auto‑Export aktivieren (22:15–23:30)", value=False)
@@ -1850,19 +1859,21 @@ with tab_screener:
         reports = st.session_state.get("screener_reports", "")
         if latest is not None and not latest.empty:
             st.info("Zeige zuletzt berechnete Screener-Ergebnisse (persistiert).")
+            st.markdown("### 2) Heutige Roh‑Signale (vor Filter)")
             cols = ["OrigSymbol","Symbol","Date","Close","EMA20","EMA50","RSI7","RSI14","MACD_hist","MACD_hist_prev","ATR14","ATRN","VolZ20","AI_Prob_Up","Direction","Rule_OK","AI_Prob","FinalScore"]
             show_cols = [c for c in cols if c in latest.columns]
             st.dataframe(latest[show_cols], use_container_width=True, column_config=build_col_config(latest[show_cols]))
 
-            st.markdown("**✅ Handelssignale & Tradeplan**")
+            st.markdown("### 3) ✅ Handelssignale & Tradeplan")
             df_plan = st.session_state.get("latest_picks_plan", pd.DataFrame())
             if df_plan is None or df_plan.empty:
                 st.info("Keine persistierten handelbaren Signale.")
             else:
                 st.dataframe(df_plan, use_container_width=True, column_config=build_col_config(df_plan))
                 st.download_button("Watchlist CSV", data=df_plan.to_csv(index=False).encode("utf-8"), file_name="watchlist_plus500_finder.csv", mime="text/csv")
-            with st.expander("🔧 Cross‑Validation Reports (datum‑basiert, purged)"):
-                st.text(reports)
+            with st.expander("5) Reports & Diagnosen", expanded=False):
+                with st.expander("🔧 Cross‑Validation Reports (datum‑basiert, purged)"):
+                    st.text(reports)
         else:
             st.info("Klicke auf **„🚦 Screener jetzt ausführen“**, nachdem die Daten geladen wurden.")
 
@@ -1907,6 +1918,7 @@ with tab_vol:
 with tab_backtest:
     st.markdown('<a id="backtest"></a>', unsafe_allow_html=True)
     st.markdown("## 🧪 Walk‑Forward Backtest" + hover_info_icon("Training bis Vortag, Signale je Tag, Simulation mit Stop/TP/Trailing/Time‑Exit."), unsafe_allow_html=True)
+    st.info("Ablauf im Backtest: **1) Zeitraum prüfen** → **2) Backtest starten** → **3) Kennzahlen, Equity und Trades auswerten**")
 
     cfg = get_model_config(params["fast_mode"], params["retrain_every_n"])
     st.caption(("Fast Mode: ~2 Jahre Fenster, selteneres Retraining, reduziertes Feature‑Set.")
@@ -1914,6 +1926,7 @@ with tab_backtest:
 
     bt_start = params["bt_start"]; bt_end = params["bt_end"]
 
+    st.markdown("### 1) Backtest ausführen")
     run_bt = st.button("🚀 Backtest starten", type="primary", key="btn_backtest")
     if run_bt:
         st.session_state["refresh_paused"] = True
