@@ -651,7 +651,7 @@ with st.sidebar.form("params_form", clear_on_submit=False):
 
     lab2name = make_search_options(candidates)
     search_labels = sorted(lab2name.keys())
-    sel_all = st.checkbox("Alle Titel auswählen", value=False)
+    sel_all = st.checkbox("Alle Titel auswählen", value=True)
     selected_labels = st.multiselect("Titel suchen & auswählen (tippbar)", options=search_labels, default=(search_labels if sel_all else []))
     selected_plus500 = [lab2name[l] for l in selected_labels]
 
@@ -668,9 +668,9 @@ with st.sidebar.form("params_form", clear_on_submit=False):
     st.divider()
     st.markdown("### 2) Strategie‑Setup")
     # Historie & Haltedauer & Skalierung & Forecast
-    history_years = st.slider("Historie (Jahre)", 1, 10, 5, 1, help=HELP["history_years"])
+    history_years = st.slider("Historie (Jahre)", 1, 10, 2, 1, help=HELP["history_years"])
     hold_days = st.slider("Haltedauer (Tage, Time-Exit)", 1, 10, 2, 1, help=HELP["hold_days"])
-    risk_level = st.slider("Risikobereitschaft", 1, 5, 3, 1, help=HELP["risk_level"])
+    risk_level = st.slider("Risikobereitschaft", 1, 5, 2, 1, help=HELP["risk_level"])
     st.caption(f"Risikoprofil: **{risk_level} = {RISK_LABELS[risk_level]}**")
     scale_mode = st.selectbox("Skalierung Stop/TP/Trailing", ["√Zeit (empfohlen)", "linear", "keine"], index=0, help=HELP["scale_mode"])
     forecast_horizon_days = st.checkbox("KI-Prognose auf Haltedauer H (statt 1 Tag)", value=True, help=HELP["forecast_horizon"])
@@ -696,11 +696,11 @@ with st.sidebar.form("params_form", clear_on_submit=False):
     st.divider()
     st.markdown("### 3) Modus, Live & Backtest")
     # Code-1‑Modus
-    code1_mode = st.checkbox("🎛️ Code‑1‑Modus (Angleichen an Code 1)", value=False, help=HELP["code1_mode"])
+    code1_mode = st.checkbox("🎛️ Code‑1‑Modus (Angleichen an Code 1)", value=True, help=HELP["code1_mode"])
 
     # Live-Preis
     st.markdown("### Live‑Preis (Beta)")
-    use_live_now = st.checkbox("📡 Live‑Preis verwenden", value=False, help=HELP["live_toggle"])
+    use_live_now = st.checkbox("📡 Live‑Preis verwenden", value=True, help=HELP["live_toggle"])
     use_live_entry_in_plan = st.checkbox("Entry im Trade‑Plan = Live‑Preis (nur Anzeige)", value=True, help=HELP["live_entry"])
     auto_refresh_on = st.checkbox("Auto‑Refresh aktivieren", value=False, help=HELP["auto_refresh"])
     live_interval_sec = st.slider("Auto‑Refresh Intervall (Sek.)", 10, 300, 60, 10)
@@ -717,7 +717,7 @@ with st.sidebar.form("params_form", clear_on_submit=False):
     debug_mode = st.checkbox("🪛 Debug-Ausgaben", value=False)
 
     # Form-Submit (zusätzlich: mobiler Submit-Button für Ticker)
-    submitted = st.form_submit_button("✅ Einstellungen übernehmen")
+    submitted = st.form_submit_button("Einstellungen übernehmen")
     submitted_any = submitted or submitted_tickers
 
 # Übernommene Settings einfrieren
@@ -740,9 +740,9 @@ if submitted_any:
     st.session_state["params_ready"] = True
 
 # Hinweis & Ablauf
-st.markdown("### 🚦 Ablauf: 1) Einstellungen übernehmen → 2) Daten laden → 3) Screener/Backtest")
+st.markdown("### 🚦 Ablauf: 1) Einstellungen übernehmen (lädt Daten) → 2) Screener/Backtest")
 if not st.session_state.get("params_ready"):
-    st.info("Bitte zuerst in der Sidebar **„✅ Einstellungen übernehmen“** klicken. Danach kannst du Daten laden.")
+    st.info("Bitte zuerst in der Sidebar **„Einstellungen übernehmen“** klicken. Danach werden die Daten direkt geladen.")
     st.stop()
 
 # =========================
@@ -814,9 +814,10 @@ for _, r in symbol_rows.iterrows():
 
 colA, colB = st.columns([1,1])
 with colA:
-    do_load = st.button("🔁 Daten laden/aktualisieren", type="primary", key="btn_load")
+    do_load_clicked = st.button("🔁 Daten laden/aktualisieren", type="primary", key="btn_load")
 with colB:
     do_reset = st.button("🧹 Reset (Panel/Signale)", key="btn_reset")
+do_load = do_load_clicked or submitted_any
 
 if do_reset:
     for k in ["panel", "signals_all", "latest_signals", "screener_reports",
@@ -1609,7 +1610,7 @@ if do_load:
 # Panel aus Session holen
 panel = st.session_state.get("panel")
 if panel is None or panel.empty:
-    st.warning("Noch keine Daten geladen. Bitte „🔁 Daten laden/aktualisieren“ klicken.")
+    st.warning("Noch keine Daten geladen. Bitte in der Sidebar „Einstellungen übernehmen“ klicken.")
     st.stop()
 
 # =========================
